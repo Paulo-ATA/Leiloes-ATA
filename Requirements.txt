@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+python-telegram-bot
+requests
+beautifulsoup4
+pydantic
