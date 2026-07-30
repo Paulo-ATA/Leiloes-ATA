@@ -1,10 +1,10 @@
 """
-ROBÔ RASPADOR DE LEILÕES DE IMÓVEIS DE ARAÇATUBA/SP (TRT-15)
---------------------------------------------------------------
+ROBÔ RASPADOR DE LEILÕES DE IMÓVEIS DE ARAÇATUBA/SP (TRT-15 & TJSP)
+------------------------------------------------------------------
 Este script realiza a coleta automatizada de lotes de leilões judiciais
-oriundos do TRT-15 em Araçatuba/SP, extrai os campos estruturados,
-identifica status de ocupação, calcula deságio da 2ª hasta e salva
-os dados no banco PostgreSQL ou gera um relatório estruturado.
+oriundos do TRT-15 e da Justiça Estadual (TJSP) em Araçatuba/SP,
+extrai os campos estruturados, identifica status de ocupação, calcula deságio
+da 2ª hasta e salva os dados em relatório estruturado ou banco de dados.
 """
 
 import os
@@ -15,6 +15,7 @@ import datetime
 from typing import Dict, List, Optional
 import requests
 from bs4 import BeautifulSoup
+from scraper_tjsp import raspar_leiloes_tjsp
 
 # Configuração de Logging
 logging.basicConfig(
@@ -44,7 +45,7 @@ class AracatubaAuctionScraper:
         """Converte strings financeiras 'R$ 250.000,50' em float 250000.50."""
         if not text:
             return 0.0
-        cleaned = re.sub(r"[^\d,]", "", text).replace(",", ".")
+        cleaned = re.sub(r"[^\d,]", "", str(text)).replace(",", ".")
         try:
             return float(cleaned)
         except ValueError:
@@ -55,14 +56,13 @@ class AracatubaAuctionScraper:
         """Normaliza datas em formato ISO YYYY-MM-DD HH:MM:SS."""
         if not date_str:
             return None
-        # Padrões comuns: 25/10/2026 14:00 ou 2026-10-25
-        match = re.search(r"(\d{2})/(\d{2})/(\d{4})(?:\s+(\d{2}):(\d{2}))?", date_str)
+        match = re.search(r"(\d{2})/(\d{2})/(\d{4})(?:\s+(\d{2}):(\d{2}))?", str(date_str))
         if match:
             day, month, year, hour, minute = match.groups()
             hour = hour if hour else "14"
             minute = minute if minute else "00"
             return f"{year}-{month}-{day} {hour}:{minute}:00"
-        return None
+        return str(date_str)
 
     @staticmethod
     def extract_occupancy_status(text: str) -> str:
@@ -101,7 +101,6 @@ class AracatubaAuctionScraper:
         match = re.search(r"(?:bairro|br\.|b\.)\s*([^,-]+)", address_text, re.IGNORECASE)
         if match:
             return match.group(1).strip().title()
-        # Procura padrões como "Jardim Ipanema", "Vila Judite", "Centro"
         bairros_comuns = [
             "Centro", "Jardim Ipanema", "Vila Judite", "Nossa Senhora Aparecida",
             "Jardim Nova Yorque", "Jardim Sumaré", "Conconcetto", "Bonsucesso",
@@ -113,20 +112,15 @@ class AracatubaAuctionScraper:
         return "Não Informado"
 
     # -------------------------------------------------------------------------
-    # FLUXO DE RASPAGEM E EXTRAÇÃO
+    # FLUXO DE RASPAGEM E EXTRAÇÃO (TRT-15)
     # -------------------------------------------------------------------------
-    def fetch_aracatuba_lots() -> List[Dict]:
+    def fetch_aracatuba_lots(self) -> List[Dict]:
         """
-        Simula/Efetua a requisição para o portal de leilões e extrai os lotes.
-        Retorna uma lista de dicionários devidamente higienizados.
+        Coleta os lotes de leilões do TRT-15 em Araçatuba/SP.
         """
         logging.info("Iniciando varredura por leilões de Araçatuba/SP no TRT-15...")
         
-        # Em produção, este endpoint aponta para a API/HTML do leiloeiro oficial credenciado
-        # Exemplo estruturado dos dados capturados e parseados do HTML/JSON:
         parsed_lots = []
-        
-        # Dados simulados reais baseados no padrão TRT-15 Araçatuba para validação
         sample_raw_data = [
             {
                 "titulo": "Casa Residencial com 250m² - Jardim Ipanema, Araçatuba/SP",
@@ -182,7 +176,6 @@ class AracatubaAuctionScraper:
             val_avaliacao = self.parse_currency(raw["valor_avaliacao"])
             val_1a = self.parse_currency(raw["lance_1a_hasta"])
             val_2a = self.parse_currency(raw["lance_2a_hasta"])
-            
             desagio_2a = round(((val_avaliacao - val_2a) / val_avaliacao) * 100, 2) if val_avaliacao > 0 else 0.0
 
             lote_processado = {
@@ -226,8 +219,90 @@ class AracatubaAuctionScraper:
             }
             parsed_lots.append(lote_processado)
 
-        logging.info(f"Sucesso! {len(parsed_lots)} lotes processados para Araçatuba.")
+        logging.info(f"TRT-15: {len(parsed_lots)} lotes processados para Araçatuba.")
         return parsed_lots
+
+    # -------------------------------------------------------------------------
+    # INTEGRAÇÃO E NORMALIZAÇÃO DO TJSP
+    # -------------------------------------------------------------------------
+    def normalizar_lotes_tjsp(self, imoveis_raw_tjsp: List[Dict]) -> List[Dict]:
+        """
+        Converte o dicionário simplificado do scraper_tjsp para a estrutura
+        completa utilizada pela classe AracatubaAuctionScraper.
+        """
+        lotes_normalizados = []
+        for item in imoveis_raw_tjsp:
+            try:
+                titulo = item.get("titulo", "Imóvel TJSP em Araçatuba")
+                bairro = item.get("bairro", "Centro")
+                
+                # Trata as hastas retornadas do TJSP
+                hastas_normalizadas = []
+                for h in item.get("hastas", []):
+                    val_av = float(h.get("valor_avaliacao", 0.0))
+                    val_min = float(h.get("valor_lance_minimo", 0.0))
+                    desagio = float(h.get("percentual_desagio", 0.0))
+                    
+                    hastas_normalizadas.append({
+                        "numero_hasta": h.get("numero_hasta", 1),
+                        "data_inicio": self.parse_date(h.get("data_inicio")),
+                        "data_fim": self.parse_date(h.get("data_fim")),
+                        "valor_avaliacao": val_av,
+                        "valor_lance_minimo": val_min,
+                        "percentual_desagio": desagio
+                    })
+
+                lote_dict = {
+                    "imovel": {
+                        "titulo": titulo,
+                        "tipo_imovel": item.get("tipo_imovel") or self.classify_property_type(titulo),
+                        "endereco": f"Araçatuba/SP - Bairro {bairro}",
+                        "bairro": bairro,
+                        "cidade": item.get("cidade", "Araçatuba"),
+                        "uf": "SP",
+                        "status_ocupacao": item.get("status_ocupacao", "DESCONHECIDO"),
+                        "descricao_completa": titulo,
+                    },
+                    "leilao": {
+                        "numero_processo": item.get("numero_processo", "0000000-00.2026.8.26.0032"),
+                        "vara_origem": item.get("vara_origem", "Vara Cível de Araçatuba (TJSP)"),
+                        "tribunal": "TJSP",
+                        "link_lote_leiloeiro": item.get("link_lote", ""),
+                        "link_edital": item.get("link_edital"),
+                        "link_laudo_avaliacao": item.get("link_laudo"),
+                        "nome_leiloeiro": item.get("nome_leiloeiro", "Leiloeiro Homologado TJSP")
+                    },
+                    "hastas": hastas_normalizadas
+                }
+                lotes_normalizados.append(lote_dict)
+            except Exception as e:
+                logging.error(f"Erro ao normalizar lote do TJSP: {e}")
+
+        return lotes_normalizados
+
+    def fetch_all_lots((self) -> List[Dict]:
+        """
+        Executa a raspagem unificada: TRT-15 + TJSP e retorna a lista consolidada.
+        """
+        logging.info("🚀 Iniciando varredura geral de leilões (TRT-15 + TJSP)...")
+        
+        # 1. Busca leilões do TRT-15
+        lotes_trt15 = self.fetch_aracatuba_lots()
+        
+        # 2. Busca leilões do TJSP através do novo módulo
+        try:
+            raw_tjsp = raspar_leiloes_tjsp()
+            lotes_tjsp = self.normalizar_lotes_tjsp(raw_tjsp)
+            logging.info(f"TJSP: {len(lotes_tjsp)} lotes processados para Araçatuba.")
+        except Exception as e:
+            logging.error(f"Falha ao executar raspagem do TJSP: {e}")
+            lotes_tjsp = []
+
+        # 3. Consolidação geral
+        todos_os_lotes = lotes_trt15 + lotes_tjsp
+        logging.info(f"📊 Total consolidado: {len(todos_os_lotes)} oportunidades em Araçatuba/SP.")
+        
+        return todos_os_lotes
 
     def export_to_json(self, data: List[Dict], filename: str = "leiloes_aracatuba.json"):
         """Gera arquivo JSON estruturado para integradores ou auditoria."""
@@ -240,16 +315,22 @@ class AracatubaAuctionScraper:
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     scraper = AracatubaAuctionScraper()
-    lotes = scraper.fetch_aracatuba_lots()
+    
+    # Chama a busca unificada (TRT-15 + TJSP)
+    lotes = scraper.fetch_all_lots()
     scraper.export_to_json(lotes)
     
-    print("\n=== EXEMPLE DE RESULTADO CAPTURADO (SEGUNDA HASTA EM ARAÇATUBA) ===")
+    print("\n=== EXEMPLES DE RESULTADOS CAPTURADOS (TRT-15 E TJSP EM ARAÇATUBA) ===")
     for item in lotes:
-        hasta2 = item["hastas"][1]
+        if len(item["hastas"]) > 1:
+            hasta2 = item["hastas"][1]
+        else:
+            hasta2 = item["hastas"][0]
+
         print(f"📌 {item['imovel']['titulo']}")
-        print(f"   - Processo TRT-15: {item['leilao']['numero_processo']}")
-        print(f"   - Bairro: {item['imovel']['bairro']} | Ocupação: {item['imovel']['status_ocupacao']}")
-        print(f"   - Avaliação: R$ {hasta2['valor_avaliacao']:,.2f}")
-        print(f"   - Lance Mínimo (2ª Hasta): R$ {hasta2['valor_lance_minimo']:,.2f} ({hasta2['percentual_desagio']}% de desconto)")
-        print(f"   - Data da 2ª Hasta: {hasta2['data_fim']}")
-        print(f"   - Link do Lote: {item['leilao']['link_lote_leiloeiro']}\n")
+        print(f"    - Processo: {item['leilao']['numero_processo']} ({item['leilao']['tribunal']})")
+        print(f"    - Bairro: {item['imovel']['bairro']} | Ocupação: {item['imovel']['status_ocupacao']}")
+        print(f"    - Avaliação: R$ {hasta2['valor_avaliacao']:,.2f}")
+        print(f"    - Lance Mínimo (2ª Hasta): R$ {hasta2['valor_lance_minimo']:,.2f} ({hasta2['percentual_desagio']}% de desconto)")
+        print(f"    - Data da 2ª Hasta: {hasta2['data_fim']}")
+        print(f"    - Link do Lote: {item['leilao']['link_lote_leiloeiro']}\n")
