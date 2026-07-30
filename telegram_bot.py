@@ -29,8 +29,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🔍 Ver Oportunidades (2ª Hasta)", callback_data="buscar_2hasta")],
         [InlineKeyboardButton("🟢 Apenas Imóveis Desocupados", callback_data="buscar_desocupados")],
         [InlineKeyboardButton("🏡 Filtrar por Casas", callback_data="tipo_CASA"),
-         InlineKeyboardButton("🏢 Filtrar por Aptos", callback_data="tipo_APARTAMENTO")],
-        [InlineKeyboardButton("⚙️ Meus Alertas Automáticos", callback_data="menu_alertas")]
+         InlineKeyboardButton("🏢 Filtrar por Aptos", callback_data="tipo_APARTAMENTO")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -45,7 +44,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "buscar_2hasta":
-        # Consulta a API FastAPI
         try:
             resposta = requests.get(f"{API_BASE_URL}/oportunidades?desagio_minimo_pct=40.0")
             imoveis = resposta.json()
@@ -85,11 +83,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Erro ao conectar com a API: {str(e)}")
 
 # ------------------------------------------------------------------------------
-# INICIALIZAÇÃO DO BOT
+# INICIALIZAÇÃO GLOBAL DO BOT (Disponível para importação no app_runner.py)
 # ------------------------------------------------------------------------------
+app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CallbackQueryHandler(callback_handler))
+
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(callback_handler))
     print("Bot do Telegram de Leilões rodando...")
     app.run_polling()
