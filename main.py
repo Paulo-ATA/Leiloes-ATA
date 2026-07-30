@@ -20,6 +20,19 @@ app = FastAPI(
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ------------------------------------------------------------------------------
+# ROTA DE CHECAGEM DE SAÚDE (HEALTH CHECK PARA O RENDER)
+# ------------------------------------------------------------------------------
+@app.get("/")
+@app.head("/")
+def status_api():
+    """Responde aos pings automáticos do Render para confirmar que a API está online."""
+    return {
+        "status": "online",
+        "sistema": "Leilões TRT-15 Araçatuba",
+        "cidade_alvo": "Araçatuba/SP"
+    }
+
+# ------------------------------------------------------------------------------
 # MODELOS DE DADOS
 # ------------------------------------------------------------------------------
 class HastaResponse(BaseModel):
@@ -62,7 +75,6 @@ def listar_oportunidades(
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
-        # Consulta a VIEW criada no script SQL do Supabase
         query = "SELECT * FROM vw_oportunidades_aracatuba WHERE percentual_desagio >= %s"
         params = [desagio_minimo_pct]
 
@@ -81,8 +93,6 @@ def listar_oportunidades(
         cursor.execute(query, params)
         rows = cursor.fetchall()
 
-        # Agrupa os resultados por imóvel e prepara a estrutura de hastas
-        resultados = []
         imoveis_map = {}
 
         for row in rows:
