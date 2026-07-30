@@ -64,7 +64,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
 
             for item in imoveis:
-                hasta2 = item["hastas"][1]
+                hasta2 = item["hastas"][-1]
                 status_emoji = "🟢" if item["status_ocupacao"] == "DESOCUPADO" else "🔴"
                 
                 mensagem_card = (
