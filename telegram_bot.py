@@ -10,9 +10,10 @@ import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
-# Configurações do Bot
+# Configurações do Bot e detecção dinâmica da porta do Render
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "SEU_TOKEN_AQUI")
-API_BASE_URL = os.getenv("API_URL", "http://localhost:8000")
+PORT = os.getenv("PORT", "8000")
+API_BASE_URL = os.getenv("API_URL", f"http://127.0.0.1:{PORT}")
 
 # ------------------------------------------------------------------------------
 # COMANDOS E INTERAÇÕES
@@ -43,9 +44,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    if query.data == "buscar_2hasta":
+    if query.data in ["buscar_2hasta", "buscar_desocupados", "tipo_CASA", "tipo_APARTAMENTO"]:
+        # Define os parâmetros de busca de acordo com o botão clicado
+        params = {"desagio_minimo_pct": 40.0}
+        
+        if query.data == "buscar_desocupados":
+            params["apenas_desocupado"] = True
+        elif query.data == "tipo_CASA":
+            params["tipo_imovel"] = "CASA"
+        elif query.data == "tipo_APARTAMENTO":
+            params["tipo_imovel"] = "APARTAMENTO"
+
         try:
-            resposta = requests.get(f"{API_BASE_URL}/oportunidades?desagio_minimo_pct=40.0")
+            resposta = requests.get(f"{API_BASE_URL}/oportunidades", params=params)
             imoveis = resposta.json()
             
             if not imoveis:
@@ -83,7 +94,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(f"Erro ao conectar com a API: {str(e)}")
 
 # ------------------------------------------------------------------------------
-# INICIALIZAÇÃO GLOBAL DO BOT (Disponível para importação no app_runner.py)
+# INICIALIZAÇÃO GLOBAL DO BOT
 # ------------------------------------------------------------------------------
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
