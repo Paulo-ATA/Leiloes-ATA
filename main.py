@@ -1,24 +1,26 @@
 """
 API RESTFUL - SISTEMA DE LEILÕES DE ARAÇATUBA (TRT-15)
 ------------------------------------------------------
-API desenvolvida em FastAPI para consultar, filtrar e servir dados
-de leilões de imóveis para o Bot do Telegram e Painel Web.
+Conecta diretamente ao banco PostgreSQL (Supabase) e retorna
+oportunidades reais capturadas do TRT-15.
 """
 
+import os
 from typing import List, Optional
-from fastapi import FastAPI, Query, HTTPException, BackgroundTasks
+from fastapi import FastAPI, Query
 from pydantic import BaseModel
-import uvicorn
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
-# Inicialização da API
 app = FastAPI(
     title="API Leilões TRT-15 Araçatuba",
-    description="Serviço para consulta e filtragem de oportunidades em leilões judiciais da Justiça do Trabalho de Araçatuba/SP.",
-    version="1.0.0"
+    description="Serviço de consulta e filtragem de leilões reais em Araçatuba/SP."
 )
 
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 # ------------------------------------------------------------------------------
-# MODELOS DE DADOS (SCHEMAS)
+# MODELOS DE DADOS
 # ------------------------------------------------------------------------------
 class HastaResponse(BaseModel):
     numero_hasta: int
@@ -36,98 +38,89 @@ class OportunidadeImovel(BaseModel):
     status_ocupacao: str
     numero_processo: str
     vara_origem: str
-    nome_leiloeiro: Optional[str] = "Não informado"
+    nome_leiloeiro: Optional[str] = "Leiloeiro Oficial TRT-15"
     link_lote: str
     link_edital: Optional[str] = None
     link_laudo: Optional[str] = None
     hastas: List[HastaResponse]
 
 # ------------------------------------------------------------------------------
-# ROTAS DA API
+# CONSULTA AO BANCO DE DADOS REAL (SUPABASE)
 # ------------------------------------------------------------------------------
-@app.get("/", tags=["Status"])
-def status_api():
-    """Verifica se a API está online e pronta para responder."""
-    return {
-        "status": "online",
-        "sistema": "Leilões TRT-15 Araçatuba",
-        "cidade_alvo": "Araçatuba/SP"
-    }
-
 @app.get("/oportunidades", response_model=List[OportunidadeImovel], tags=["Leilões"])
 def listar_oportunidades(
-    valor_maximo_lance: Optional[float] = Query(None, description="Valor máximo aceito para o lance de 2ª hasta"),
-    desagio_minimo_pct: float = Query(40.0, description="Percentual mínimo de desconto em relação à avaliação (ex: 50.0 para 50%)"),
-    apenas_desocupado: bool = Query(False, description="Se True, filtra apenas imóveis com status 'DESOCUPADO'"),
-    tipo_imovel: Optional[str] = Query(None, description="Filtrar por tipo: CASA, APARTAMENTO, TERRENO, GALPAO, COMERCIAL, RURAL"),
-    bairro: Optional[str] = Query(None, description="Filtrar por bairro em Araçatuba (ex: Ipanema, Centro)")
+    valor_maximo_lance: Optional[float] = Query(None),
+    desagio_minimo_pct: float = Query(40.0),
+    apenas_desocupado: bool = Query(False),
+    tipo_imovel: Optional[str] = Query(None),
+    bairro: Optional[str] = Query(None)
 ):
-    """
-    Retorna as melhores oportunidades da 2ª hasta em Araçatuba/SP com base nos filtros configurados.
-    """
-    # Em produção, esta função executa a SQL 'vw_oportunidades_aracatuba' no PostgreSQL/Supabase
-    # Exemplo de resposta estruturada servida pela API:
-    resultados_simulados = [
-        {
-            "imovel_id": "c1a2b3c4-1111-2222-3333-444455556666",
-            "titulo": "Casa Residencial 250m² - Jardim Ipanema",
-            "tipo_imovel": "CASA",
-            "bairro": "Jardim Ipanema",
-            "cidade": "Araçatuba",
-            "status_ocupacao": "DESOCUPADO",
-            "numero_processo": "0010452-18.2024.5.15.0011",
-            "vara_origem": "1ª Vara do Trabalho / Divisão de Execução",
-            "nome_leiloeiro": "Cida Fixer Leilões",
-            "link_lote": "https://www.leiloeiroexemplo.com.br/lote/aracatuba-casa-ipanema-102",
-            "link_edital": "https://www.leiloeiroexemplo.com.br/editais/edital_0010452.pdf",
-            "link_laudo": "https://www.leiloeiroexemplo.com.br/laudos/laudo_0010452.pdf",
-            "hastas": [
-                {
-                    "numero_hasta": 1,
-                    "data_fim": "2026-08-15 13:00:00",
-                    "valor_avaliacao": 380000.00,
-                    "valor_lance_minimo": 380000.00,
-                    "percentual_desagio": 0.0
-                },
-                {
-                    "numero_hasta": 2,
-                    "data_fim": "2026-08-29 13:00:00",
-                    "valor_avaliacao": 380000.00,
-                    "valor_lance_minimo": 190000.00,
-                    "percentual_desagio": 50.0
+    if not DATABASE_URL:
+        return []
+
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Consulta a VIEW criada no script SQL do Supabase
+        query = "SELECT * FROM vw_oportunidades_aracatuba WHERE percentual_desagio >= %s"
+        params = [desagio_minimo_pct]
+
+        if apenas_desocupado:
+            query += " AND status_ocupacao = 'DESOCUPADO'"
+        if tipo_imovel:
+            query += " AND tipo_imovel = %s"
+            params.append(tipo_imovel.upper())
+        if bairro:
+            query += " AND bairro ILIKE %s"
+            params.append(f"%{bairro}%")
+        if valor_maximo_lance:
+            query += " AND valor_lance_minimo <= %s"
+            params.append(valor_maximo_lance)
+
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+
+        # Agrupa os resultados por imóvel e prepara a estrutura de hastas
+        resultados = []
+        imoveis_map = {}
+
+        for row in rows:
+            imovel_id = str(row["imovel_id"])
+            if imovel_id not in imoveis_map:
+                imoveis_map[imovel_id] = {
+                    "imovel_id": imovel_id,
+                    "titulo": row["titulo"],
+                    "tipo_imovel": row["tipo_imovel"],
+                    "bairro": row["bairro"] or "Não informado",
+                    "cidade": row["cidade"],
+                    "status_ocupacao": row["status_ocupacao"],
+                    "numero_processo": row["numero_processo"],
+                    "vara_origem": row["vara_origem"],
+                    "nome_leiloeiro": row["nome_leiloeiro"] or "Leiloeiro Oficial TRT-15",
+                    "link_lote": row["link_lote_leiloeiro"],
+                    "link_edital": row["link_edital"],
+                    "link_laudo": row["link_laudo_avaliacao"],
+                    "hastas": []
                 }
-            ]
-        }
-    ]
-
-    # Aplicação dos filtros em memória (no banco real, a própria query SQL filtra)
-    filtrados = []
-    for item in resultados_simulados:
-        hasta2 = item["hastas"][1]
-        
-        if valor_maximo_lance and hasta2["valor_lance_minimo"] > valor_maximo_lance:
-            continue
-        if hasta2["percentual_desagio"] < desagio_minimo_pct:
-            continue
-        if apenas_desocupado and item["status_ocupacao"] != "DESOCUPADO":
-            continue
-        if tipo_imovel and item["tipo_imovel"].upper() != tipo_imovel.upper():
-            continue
-        if bairro and bairro.lower() not in item["bairro"].lower():
-            continue
             
-        filtrados.append(item)
+            imoveis_map[imovel_id]["hastas"].append({
+                "numero_hasta": row["numero_hasta"],
+                "data_fim": str(row["data_fim"]),
+                "valor_avaliacao": float(row["valor_avaliacao"]),
+                "valor_lance_minimo": float(row["valor_lance_minimo"]),
+                "percentual_desagio": float(row["percentual_desagio"])
+            })
 
-    return filtrados
+        cursor.close()
+        conn.close()
 
-@app.post("/executar-varredura", tags=["Automação"])
-def disparar_varredura(background_tasks: BackgroundTasks):
-    """
-    Aciona o robô raspador em segundo plano para varrer os leiloeiros do TRT-15 em busca de novos lotes.
-    """
-    # Adiciona a tarefa de raspagem para rodar sem travar a resposta da API
-    # background_tasks.add_task(executar_scraper_aracatuba)
-    return {"mensagem": "Varredura iniciada em segundo plano. Novos leilões de Araçatuba serão cadastrados em breve."}
+        return list(imoveis_map.values())
+
+    except Exception as e:
+        print(f"Erro de conexão com o Supabase: {e}")
+        return []
 
 if __name__ == "__main__":
+    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
