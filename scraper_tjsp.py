@@ -2,7 +2,7 @@
 RASPADOR REAL DETALHADO (DEEP SCRAPER) - MEGA LEILÕES (ARAÇATUBA/SP)
 -------------------------------------------------------------------
 Módulo que acessa a página individual de cada lote para extrair 
-dados completos: valores, processo CNJ, datas reais, bairro e edital.
+dados completos: valores financeiros, processo CNJ, datas reais, bairro e edital.
 """
 
 import re
@@ -34,7 +34,8 @@ def raspar_detalhes_lote(url_lote: str, headers: dict) -> dict:
             return {}
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        texto_pagina = soup.get_text()
+        # separator=" " garante espaço entre tags HTML (evita grudar palavras e números)
+        texto_pagina = soup.get_text(separator=" ", strip=True)
 
         # 1. Título do Imóvel
         titulo_tag = soup.select_one("h1, .instance-title, .card-title")
@@ -46,24 +47,30 @@ def raspar_detalhes_lote(url_lote: str, headers: dict) -> dict:
             slug = url_lote.rstrip("/").split("/")[-1]
             num_processo = f"MEGA-{slug[:35]}"
 
-        # 3. Extração de Valores Financeiros
-        # Avaliação
+        # 3. Extração Inteligente de Valores Financeiros
         val_av = 0.0
-        match_av = re.search(r"Avaliação:\s*R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
+        val_min = 0.0
+
+        # Regex flexível para Avaliação
+        match_av = re.search(r"(?:Avalia[çc][ãa]o|Avaliado\s*em|Valor\s*de\s*Avalia[çc][ãa]o)[^\d]*R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
         if match_av:
             val_av = parse_valor_br(match_av.group(1))
 
-        # Lance Mínimo / 2ª Hasta
-        val_min = 0.0
-        match_min = re.search(r"(?:2ª\s*Hasta|Lance\s*Mínimo|2º\s*Leilão):\s*R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
+        # Regex flexível para 2ª Hasta / Lance Mínimo
+        match_min = re.search(r"(?:2º\s*Leil[ãa]o|2ª\s*Hasta|Lance\s*M[íi]nimo)[^\d]*R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
         if match_min:
             val_min = parse_valor_br(match_min.group(1))
-        elif match_av:
-            # Caso não encontre rótulo explícito, busca o menor valor em R$ listado na página
-            todos_valores = [parse_valor_br(v) for v in re.findall(r"R\$\s*([\d\.,]+)", texto_pagina)]
-            todos_valores = [v for v in todos_valores if 0 < v <= val_av]
-            if todos_valores:
-                val_min = min(todos_valores)
+
+        # Fallback financeiro inteligente caso a rotulagem em texto varie
+        if val_av == 0.0 or val_min == 0.0:
+            todos_r = re.findall(r"R\$\s*([\d\.,]+)", texto_pagina)
+            valores_floats = sorted(list(set([parse_valor_br(v) for v in todos_r if parse_valor_br(v) > 5000.0])))
+            if valores_floats:
+                if val_av == 0.0:
+                    val_av = max(valores_floats)
+                if val_min == 0.0:
+                    # Se houver mais de um valor acima de R$ 5.000, o menor é a 2ª hasta/lance mínimo
+                    val_min = min(valores_floats) if len(valores_floats) > 1 else val_av
 
         desagio = ((val_av - val_min) / val_av) * 100 if val_av > 0 and val_min > 0 else 0.0
 
@@ -83,7 +90,7 @@ def raspar_detalhes_lote(url_lote: str, headers: dict) -> dict:
             if not link_edital.startswith("http"):
                 link_edital = f"https://www.megaleiloes.com.br{link_edital}"
 
-        # 6. Extração das Datas
+        # 6. Extração de Datas
         datas = re.findall(r"(\d{2}/\d{2}/\d{4}\s+às\s+\d{2}:\d{2})", texto_pagina)
         data_ini = "2026-08-01 13:00:00"
         data_fim = "2026-08-15 13:00:00"
@@ -137,7 +144,6 @@ def raspar_leiloes_tjsp() -> list:
 
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # Encontra todos os links de imóveis na lista
         links_lotes = set()
         for a_tag in soup.select("a[href*='/imoveis/']"):
             href = a_tag.get("href", "")
@@ -147,7 +153,6 @@ def raspar_leiloes_tjsp() -> list:
 
         logging.info(f"🔗 {len(links_lotes)} links de lotes encontrados em Araçatuba. Extraindo detalhes...")
 
-        # Acessa cada lote individualmente
         for url in links_lotes:
             detalhes = raspar_detalhes_lote(url, headers)
             if detalhes:
