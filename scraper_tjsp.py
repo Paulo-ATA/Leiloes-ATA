@@ -13,7 +13,7 @@ def extrair_processo(texto: str) -> str:
     """Identifica número de processo no padrão CNJ."""
     padrao = r"\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}"
     match = re.search(padrao, texto)
-    return match.group(0) if match else "Processo em Edital"
+    return match.group(0) if match else None
 
 def raspar_leiloes_tjsp() -> list:
     """
@@ -53,7 +53,13 @@ def raspar_leiloes_tjsp() -> list:
             if not link_lote.startswith("http"):
                 link_lote = f"https://www.megaleiloes.com.br{link_lote}"
 
-            # Extração dos valores financeiro
+            # Garante uma chave única caso o CNJ não esteja no texto do card
+            proc = extrair_processo(texto_card)
+            if not proc:
+                slug_lote = link_lote.rstrip("/").split("/")[-1]
+                proc = f"MEGA-{slug_lote}"
+
+            # Extração dos valores financeiros
             val_av_match = re.search(r"Avaliação:\s*R\$\s*([\d\.,]+)", texto_card, re.IGNORECASE)
             val_min_match = re.search(r"(?:2ª Hasta|Lance Mínimo|1º Leilão):\s*R\$\s*([\d\.,]+)", texto_card, re.IGNORECASE)
 
@@ -61,7 +67,6 @@ def raspar_leiloes_tjsp() -> list:
             val_min = float(val_min_match.group(1).replace(".", "").replace(",", ".")) if val_min_match else 0.0
 
             desagio = ((val_av - val_min) / val_av) * 100 if val_av > 0 else 0.0
-            proc = extrair_processo(texto_card)
 
             oportunidades.append({
                 "titulo": titulo[:150],
