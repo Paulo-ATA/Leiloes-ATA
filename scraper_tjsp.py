@@ -1,8 +1,8 @@
 """
 RASPADOR REAL DETALHADO (DEEP SCRAPER) - MEGA LEILÕES (ARAÇATUBA/SP)
 -------------------------------------------------------------------
-Módulo que acessa a página individual de cada lote para extrair 
-dados completos: valores financeiros, processo CNJ, datas reais, bairro e edital.
+Captura de dados imobiliários, processo CNJ, lance mínimo, datas, 
+débitos (IPTU/Condomínio) e análise de sub-rogação legal.
 """
 
 import re
@@ -26,6 +26,65 @@ def parse_valor_br(texto: str) -> float:
     except ValueError:
         return 0.0
 
+def analisar_debitos_e_subrogacao(texto: str) -> tuple:
+    """
+    Identifica débitos de IPTU e condomínio e analisa cláusulas de sub-rogação.
+    Retorna: (valor_iptu, valor_condominio, debitos_subrogados, obs_texto)
+    """
+    val_iptu = 0.0
+    val_condo = 0.0
+
+    # 1. IPTU e Débitos Fiscais
+    match_iptu = re.search(
+        r"(?:IPTU|d[eé]bitos?\s+fiscais?|d[íi]vida\s+ativa|prefeitura)[^\d]*?R\$\s*([\d\.,]+)",
+        texto,
+        re.IGNORECASE
+    )
+    if match_iptu:
+        val_iptu = parse_valor_br(match_iptu.group(1))
+
+    # 2. Débitos Condominiais
+    match_condo = re.search(
+        r"(?:condom[íi]nio|d[eé]bitos?\s+condominiais?)[^\d]*?R\$\s*([\d\.,]+)",
+        texto,
+        re.IGNORECASE
+    )
+    if match_condo:
+        val_condo = parse_valor_br(match_condo.group(1))
+
+    # 3. Análise do Termo de Sub-rogação / Responsabilidade
+    subrogados = True  # Padrão legal genérico (Art. 130 CTN)
+
+    # Expressões que indicam que o arrematante assumirá a dívida
+    padrões_nao_subroga = [
+        r"responsabilidade\s+do\s+arrematante",
+        r"por\s+conta\s+do\s+arrematante",
+        r"dever[áa]\s+ser\s+pago\s+pelo\s+arrematante",
+        r"sem\s+sub-roga[çc][ãa]o",
+        r"arrematante\s+responder[áa]"
+    ]
+
+    for pat in padrões_nao_subroga:
+        if re.search(pat, texto, re.IGNORECASE):
+            subrogados = False
+            break
+
+    # Se explicitamente citar sub-rogação ou Art. 130
+    if re.search(r"(?:sub-roga(?:r[ãa]o|m-se)|art(?:igo|\.)?\s*130|ficar[ãa]o?\s+sub-rogados)", texto, re.IGNORECASE):
+        subrogados = True
+
+    # Monta texto descritivo explicativo
+    obs_list = []
+    if val_iptu > 0:
+        obs_list.append(f"IPTU/Fiscal: R$ {val_iptu:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    if val_condo > 0:
+        obs_list.append(f"Condomínio: R$ {val_condo:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+    regra = "Sub-rogados no preço da arrematação" if subrogados else "ALERT: Débitos por conta do ARREMATANTE"
+    obs_list.append(f"Regra: {regra}")
+
+    return val_iptu, val_condo, subrogados, " | ".join(obs_list)
+
 def raspar_detalhes_lote(url_lote: str, headers: dict) -> dict:
     """Acessa a página individual do imóvel para capturar informações profundas."""
     try:
@@ -34,7 +93,6 @@ def raspar_detalhes_lote(url_lote: str, headers: dict) -> dict:
             return {}
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        # separator=" " garante espaço entre tags HTML (evita grudar palavras e números)
         texto_pagina = soup.get_text(separator=" ", strip=True)
 
         # 1. Título do Imóvel
@@ -47,42 +105,50 @@ def raspar_detalhes_lote(url_lote: str, headers: dict) -> dict:
             slug = url_lote.rstrip("/").split("/")[-1]
             num_processo = f"MEGA-{slug[:35]}"
 
-        # 3. Extração Inteligente de Valores Financeiros
+        # 3. Análise Detalhada de Débitos e Sub-rogação
+        val_iptu, val_condo, debitos_subrogados, obs_debitos = analisar_debitos_e_subrogacao(texto_pagina)
+
+        # 4. Extração de Valores Financials (Avaliação e 2ª Hasta)
         val_av = 0.0
         val_min = 0.0
 
-        # Regex flexível para Avaliação
-        match_av = re.search(r"(?:Avalia[çc][ãa]o|Avaliado\s*em|Valor\s*de\s*Avalia[çc][ãa]o)[^\d]*R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
+        # Captura da Avaliação
+        match_av = re.search(r"Avalia[çc][ãa]o[^\d]*?R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
         if match_av:
             val_av = parse_valor_br(match_av.group(1))
 
-        # Regex flexível para 2ª Hasta / Lance Mínimo
-        match_min = re.search(r"(?:2º\s*Leil[ãa]o|2ª\s*Hasta|Lance\s*M[íi]nimo)[^\d]*R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
-        if match_min:
-            val_min = parse_valor_br(match_min.group(1))
+        # Captura do Lance Mínimo da 2ª Hasta
+        match_min_2a = re.search(r"(?:2º\s*Leil[ãa]o|2ª\s*Hasta)[^R\$]*?R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
+        if match_min_2a:
+            val_min = parse_valor_br(match_min_2a.group(1))
 
-        # Fallback financeiro inteligente caso a rotulagem em texto varie
-        if val_av == 0.0 or val_min == 0.0:
+        # Descarte de falsos positivos (impede que o robô use valores de IPTU/condomínio como lance mínimo)
+        if val_min > 0 and (val_min == val_iptu or val_min == val_condo or val_min < (val_av * 0.35)):
+            val_min = 0.0
+
+        # Regra de fallback caso o lance mínimo não venha estruturado no HTML
+        if val_av > 0 and val_min == 0.0:
             todos_r = re.findall(r"R\$\s*([\d\.,]+)", texto_pagina)
-            valores_floats = sorted(list(set([parse_valor_br(v) for v in todos_r if parse_valor_br(v) > 5000.0])))
-            if valores_floats:
-                if val_av == 0.0:
-                    val_av = max(valores_floats)
-                if val_min == 0.0:
-                    # Se houver mais de um valor acima de R$ 5.000, o menor é a 2ª hasta/lance mínimo
-                    val_min = min(valores_floats) if len(valores_floats) > 1 else val_av
+            floats = sorted(list(set([parse_valor_br(v) for v in todos_r])))
+            # Seleciona apenas valores plausíveis para lance mínimo (35% a 95% da avaliação)
+            plausiveis = [v for v in floats if (val_av * 0.35) <= v < val_av and v != val_iptu and v != val_condo]
+            if plausiveis:
+                val_min = plausiveis[-1]
+            else:
+                # Regra padrão TJSP para 2ª hasta (60% do valor de avaliação)
+                val_min = round(val_av * 0.60, 2)
 
         desagio = ((val_av - val_min) / val_av) * 100 if val_av > 0 and val_min > 0 else 0.0
 
-        # 4. Bairro
+        # 5. Bairro
         bairro = "Araçatuba"
         match_bairro = re.search(r"(?:bairro|b\.|jardim|parque|residencial)\s*([A-Za-zÀ-ÿ0-9\s]+?)(?:,|\.|-|\n)", texto_pagina, re.IGNORECASE)
         if match_bairro:
             cand = match_bairro.group(1).strip()
-            if len(cand) < 30:
+            if 3 <= len(cand) < 30 and not cand.isdigit():
                 bairro = cand.title()
 
-        # 5. Link do Edital PDF
+        # 6. Link do Edital PDF
         link_edital = None
         edital_tag = soup.select_one("a[href*='edital'], a[href*='.pdf']")
         if edital_tag and edital_tag.get("href"):
@@ -90,7 +156,7 @@ def raspar_detalhes_lote(url_lote: str, headers: dict) -> dict:
             if not link_edital.startswith("http"):
                 link_edital = f"https://www.megaleiloes.com.br{link_edital}"
 
-        # 6. Extração de Datas
+        # 7. Extração de Datas
         datas = re.findall(r"(\d{2}/\d{2}/\d{4}\s+às\s+\d{2}:\d{2})", texto_pagina)
         data_ini = "2026-08-01 13:00:00"
         data_fim = "2026-08-15 13:00:00"
@@ -110,6 +176,10 @@ def raspar_detalhes_lote(url_lote: str, headers: dict) -> dict:
             "nome_leiloeiro": "Mega Leilões",
             "link_lote": url_lote,
             "link_edital": link_edital,
+            "valor_debitos_iptu": val_iptu,
+            "valor_debitos_condominio": val_condo,
+            "debitos_subrogados": debitos_subrogados,
+            "observacoes_debitos": obs_debitos,
             "hastas": [
                 {
                     "numero_hasta": 2,
