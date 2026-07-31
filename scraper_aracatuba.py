@@ -280,7 +280,7 @@ class AracatubaAuctionScraper:
 
         return lotes_normalizados
 
-    def fetch_all_lots((self) -> List[Dict]:
+    def fetch_all_lots(self) -> List[Dict]:
         """
         Executa a raspagem unificada: TRT-15 + TJSP e retorna a lista consolidada.
         """
@@ -311,26 +311,77 @@ class AracatubaAuctionScraper:
         logging.info(f"Dados exportados com sucesso para {filename}")
 
 # -----------------------------------------------------------------------------
-# EXECUÇÃO DE TESTE E AUDITORIA
+# GRAVAR DADOS NO SUPABASE
 # -----------------------------------------------------------------------------
+import json
+import logging
+import os
+import psycopg2
+from psycopg2.extras import execute_values
+
+def salvar_no_banco(lotes: list):
+    """
+    Insere ou atualiza (upsert) os leilões coletados no banco de dados PostgreSQL/Supabase.
+    """
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        logging.warning("⚠️ DATABASE_URL não configurada. Salvação em banco pulada.")
+        return
+
+    try:
+        conn = psycopg2.connect(db_url)
+        cur = conn.cursor()
+
+        # Ajuste a query abaixo se a estrutura de tabelas/colunas no seu Supabase tiver nomes diferentes
+        query = """
+            INSERT INTO leiloes (
+                numero_processo, tribunal, vara_origem, titulo, tipo_imovel,
+                bairro, cidade, status_ocupacao, nome_leiloeiro,
+                link_lote, link_edital, hastas_json
+            ) VALUES %s
+            ON CONFLICT (numero_processo) DO UPDATE SET
+                titulo = EXCLUDED.titulo,
+                status_ocupacao = EXCLUDED.status_ocupacao,
+                hastas_json = EXCLUDED.hastas_json,
+                updated_at = NOW();
+        """
+
+        valores = []
+        for item in lotes:
+            imovel = item["imovel"]
+            leilao = item["leilao"]
+            valores.append((
+                leilao["numero_processo"],
+                leilao["tribunal"],
+                leilao["vara_origem"],
+                imovel["titulo"],
+                imovel["tipo_imovel"],
+                imovel["bairro"],
+                imovel["cidade"],
+                imovel["status_ocupacao"],
+                leilao["nome_leiloeiro"],
+                leilao["link_lote_leiloeiro"],
+                leilao.get("link_edital"),
+                json.dumps(item["hastas"])
+            ))
+
+        execute_values(cur, query, valores)
+        conn.commit()
+        cur.close()
+        conn.close()
+        logging.info(f"✅ {len(lotes)} oportunidades salvas/atualizadas no Supabase com sucesso!")
+
+    except Exception as e:
+        logging.error(f"❌ Erro ao salvar dados no Supabase: {e}")
+
 if __name__ == "__main__":
     scraper = AracatubaAuctionScraper()
     
-    # Chama a busca unificada (TRT-15 + TJSP)
+    # 1. Executa a busca unificada (TRT-15 + TJSP)
     lotes = scraper.fetch_all_lots()
+    
+    # 2. Exporta backup local em JSON
     scraper.export_to_json(lotes)
     
-    print("\n=== EXEMPLES DE RESULTADOS CAPTURADOS (TRT-15 E TJSP EM ARAÇATUBA) ===")
-    for item in lotes:
-        if len(item["hastas"]) > 1:
-            hasta2 = item["hastas"][1]
-        else:
-            hasta2 = item["hastas"][0]
-
-        print(f"📌 {item['imovel']['titulo']}")
-        print(f"    - Processo: {item['leilao']['numero_processo']} ({item['leilao']['tribunal']})")
-        print(f"    - Bairro: {item['imovel']['bairro']} | Ocupação: {item['imovel']['status_ocupacao']}")
-        print(f"    - Avaliação: R$ {hasta2['valor_avaliacao']:,.2f}")
-        print(f"    - Lance Mínimo (2ª Hasta): R$ {hasta2['valor_lance_minimo']:,.2f} ({hasta2['percentual_desagio']}% de desconto)")
-        print(f"    - Data da 2ª Hasta: {hasta2['data_fim']}")
-        print(f"    - Link do Lote: {item['leilao']['link_lote_leiloeiro']}\n")
+    # 3. Atualiza o banco de dados do Supabase
+    salvar_no_banco(lotes)
