@@ -1,8 +1,8 @@
 """
 RASPADOR DE LEILÕES DE IMÓVEIS (ARAÇATUBA/SP) - TJSP & EXTRAJUDICIAL
 -------------------------------------------------------------------
-Captura e processa lotes da Mega Leilões para a cidade de Araçatuba/SP.
-Exporta a função 'raspar_leiloes_tjsp' utilizada pelo 'scraper_aracatuba.py'.
+Versão Refatorada: Com filtro estrito de URLs, higienização de DOM 
+(evitando falsos positivos) e extração precisa de hastas via Regex flexível.
 """
 
 import os
@@ -39,6 +39,7 @@ def fmt_data_iso(data_str: str) -> str:
     if not data_str:
         return ""
     try:
+        # Captura o padrão DD/MM/YYYY e HH:MM ignorando o texto entre eles (ex: ' às ')
         match = re.search(r"(\d{2}/\d{2}/\d{4})[^\d]*(\d{2}:\d{2})", data_str)
         if match:
             dt_raw = f"{match.group(1)} {match.group(2)}"
@@ -66,14 +67,14 @@ def extrair_bairro(titulo: str, endereco: str) -> str:
 
     return "Araçatuba"
 
-def extrair_hastas_pagina(soup: BeautifulSoup, texto_pagina: str, val_avaliacao: float) -> list:
+def extrair_hastas_pagina(texto_limpo: str, val_avaliacao: float) -> list:
     """Extrai a tabela de 1ª e 2ª Praças com valores e datas corretas."""
     hastas = []
 
-    # Procura padrões de 1ª e 2ª Praça / Hasta
+    # Procura padrões flexíveis de 1ª e 2ª Praça / Hasta
     padrão_pracas = re.findall(
-        r"(1ª|2ª)\s*(?:Praça|Hasta|Leilã[o0])[^\d]*?(\d{2}/\d{2}/\d{4}[^\n\r]*?\d{2}:\d{2})[^\d]*?R\$\s*([\d\.,]+)",
-        texto_pagina,
+        r"(1ª|2ª|1º|2º|Única)\s*(?:Praça|Hasta|Leilã[o0]).*?(\d{2}/\d{2}/\d{4}[^\d]*\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
+        texto_limpo,
         re.IGNORECASE
     )
 
@@ -96,10 +97,10 @@ def extrair_hastas_pagina(soup: BeautifulSoup, texto_pagina: str, val_avaliacao:
                 "percentual_desagio": max(desagio, 0.0)
             })
 
-    # Tratamento para Leilões Extrajudiciais com "Valor inicial"
+    # Tratamento para Leilões Extrajudiciais (geralmente possuem "Valor inicial" e "Data")
     if not hastas:
-        match_ini = re.search(r"Valor\s+inicial[^\d]*?R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
-        match_data_fim = re.search(r"Data[^\d]*?(\d{2}/\d{2}/\d{4}[^\n\r]*?\d{2}:\d{2})", texto_pagina, re.IGNORECASE)
+        match_ini = re.search(r"Valor\s+inicial.*?R\$\s*([\d\.,]+)", texto_limpo, re.IGNORECASE)
+        match_data_fim = re.search(r"Data(?:.*?|\s*:\s*)(\d{2}/\d{2}/\d{4}[^\d]*\d{2}:\d{2})", texto_limpo, re.IGNORECASE)
 
         v_lance = parse_valor_br(match_ini.group(1)) if match_ini else val_avaliacao
         dt_iso = fmt_data_iso(match_data_fim.group(1)) if match_data_fim else ""
@@ -108,14 +109,15 @@ def extrair_hastas_pagina(soup: BeautifulSoup, texto_pagina: str, val_avaliacao:
         if val_avaliacao > 0 and v_lance > 0:
             desagio = round(((val_avaliacao - v_lance) / val_avaliacao) * 100, 2)
 
-        hastas.append({
-            "numero_hasta": 2,
-            "data_inicio": dt_iso,
-            "data_fim": dt_iso,
-            "valor_avaliacao": val_avaliacao,
-            "valor_lance_minimo": v_lance,
-            "percentual_desagio": max(desagio, 0.0)
-        })
+        if dt_iso or match_ini:
+            hastas.append({
+                "numero_hasta": 2, # Classifica como oportunidade única final
+                "data_inicio": dt_iso,
+                "data_fim": dt_iso,
+                "valor_avaliacao": val_avaliacao,
+                "valor_lance_minimo": v_lance,
+                "percentual_desagio": max(desagio, 0.0)
+            })
 
     return hastas
 
@@ -127,36 +129,46 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
             return {}
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        texto_pagina = soup.get_text(separator=" ", strip=True)
+        
+        # 1. Higienização do DOM: Remove menus, rodapés e cabeçalhos para evitar falsos positivos
+        for element in soup(["header", "footer", "nav", "aside", "script", "style"]):
+            element.decompose()
+            
+        # Transforma o texto principal em uma string de espaços únicos
+        texto_pagina = re.sub(r'\s+', ' ', soup.get_text(" ")).strip()
 
-        # 1. Título do Lote
+        # 2. Título do Lote
         titulo_tag = soup.select_one("h1, .instance-title, .card-title")
         titulo = titulo_tag.get_text(strip=True) if titulo_tag else "Imóvel em Leilão em Araçatuba/SP"
 
-        # 2. Endereço e Bairro
+        # 3. Endereço e Bairro
         match_end = re.search(r"(?:Rua|Av|Avenida|Praça|Alameda)[^,\n]+,[^,\n]+,[^,\n]+, Araçatuba, SP", texto_pagina, re.IGNORECASE)
         endereco = match_end.group(0) if match_end else ""
         bairro = extrair_bairro(titulo, endereco)
 
-        # 3. Natureza: Judicial vs. Extrajudicial
-        is_extrajudicial = "extrajudicial" in texto_pagina.lower() or "comitente" in texto_pagina.lower()
+        # 4. Natureza: Judicial vs. Extrajudicial (Restrito ao conteúdo higienizado)
+        # Processos judiciais têm o padrão CNJ estrito
+        match_proc = re.search(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", texto_pagina)
+        
+        is_extrajudicial = False
+        if not match_proc:
+            if "extrajudicial" in titulo.lower() or re.search(r"\bcomitente\b", texto_pagina, re.IGNORECASE):
+                is_extrajudicial = True
         
         if is_extrajudicial:
-            match_comitente = re.search(r"Comitente[^\w]*([A-Za-z0-9\s\.\-S\/A]+?)(?:Extrajudicial|Valor|Aberto|Datas|\n)", texto_pagina, re.IGNORECASE)
+            match_comitente = re.search(r"Comitente[\s:]+([A-Za-z0-9\s\.\-S\/A]+?)(?:Extrajudicial|Valor|Aberto|Datas|Início|Data)", texto_pagina, re.IGNORECASE)
             comitente = match_comitente.group(1).strip() if match_comitente else "Instituição Financeira"
-            slug = url_lote.rstrip("/").split("/")[-1]
+            slug = url_lote.split("?")[0].rstrip("/").split("/")[-1]
             num_processo = f"EXTRA-{slug[:20]}"
             vara_origem = f"Alienação Fiduciária ({comitente})"
             debitos_subrogados = False
         else:
-            match_proc = re.search(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", texto_pagina)
             num_processo = match_proc.group(0) if match_proc else "NÃO INFORMADO"
-
             match_vara = re.search(r"(\d+ª\s+Vara\s+[^\n,\.]+Comarca\s+de\s+Araçatuba/SP)", texto_pagina, re.IGNORECASE)
             vara_origem = match_vara.group(1).strip() if match_vara else "Vara Cível de Araçatuba/SP"
             debitos_subrogados = True
 
-        # 4. Links Úteis (Edital em PDF)
+        # 5. Links Úteis (Edital em PDF)
         link_edital = None
         edital_tag = soup.find("a", href=re.compile(r"edital.*\.pdf", re.IGNORECASE))
         if edital_tag:
@@ -164,13 +176,13 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
             if not link_edital.startswith("http"):
                 link_edital = f"https://www.megaleiloes.com.br{link_edital}"
 
-        # 5. Avaliação e Hastas
+        # 6. Avaliação e Hastas
         match_av = re.search(r"Valor\s+de\s+Avalia[çc][ãa]o[^\d]*?R\$\s*([\d\.,]+)", texto_pagina, re.IGNORECASE)
         val_avaliacao = parse_valor_br(match_av.group(1)) if match_av else 0.0
 
-        hastas = extrair_hastas_pagina(soup, texto_pagina, val_avaliacao)
+        hastas = extrair_hastas_pagina(texto_pagina, val_avaliacao)
 
-        # 6. Débitos IPTU / Condomínio
+        # 7. Débitos IPTU / Condomínio (Simplificado)
         val_iptu = 0.0
         val_condo = 0.0
 
@@ -183,7 +195,7 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
             "cidade": "Araçatuba",
             "status_ocupacao": "DESCONHECIDO",
             "nome_leiloeiro": "Mega Leilões",
-            "link_lote": url_lote,
+            "link_lote": url_lote.split("?")[0], # Salva a URL limpa
             "link_edital": link_edital,
             "valor_debitos_iptu": val_iptu,
             "valor_debitos_condominio": val_condo,
@@ -242,7 +254,7 @@ def salvar_no_supabase(dados: dict):
 def raspar_leiloes_tjsp(urls_alvo: list = None) -> list:
     """
     Função pública invocada pelo orquestrador.
-    Se não receber uma lista de URLs, busca automaticamente os imóveis de Araçatuba.
+    Processa apenas links diretos de imóveis, ignorando paginação e indexadores.
     """
     if not urls_alvo:
         url_busca = "https://www.megaleiloes.com.br/imoveis/sp/aracatuba"
@@ -251,9 +263,17 @@ def raspar_leiloes_tjsp(urls_alvo: list = None) -> list:
             if resp.status_code == 200:
                 soup = BeautifulSoup(resp.text, "html.parser")
                 links = soup.find_all("a", href=re.compile(r"/imoveis/.*aracatuba", re.IGNORECASE))
-                urls_alvo = list(set([l["href"] for l in links if "href" in l.attrs]))
-                # Garante URLs completas
-                urls_alvo = [u if u.startswith("http") else f"https://www.megaleiloes.com.br{u}" for u in urls_alvo]
+                todas_urls = list(set([l["href"] for l in links if "href" in l.attrs]))
+                
+                # Filtro Estrito: Garante que é uma URL completa e que termina com o padrão de lote da Mega Leilões
+                urls_alvo = []
+                for u in todas_urls:
+                    u_completa = u if u.startswith("http") else f"https://www.megaleiloes.com.br{u}"
+                    url_base = u_completa.split("?")[0]
+                    # Exige que a URL termine com hífen seguido de letras e números (ex: -j126874)
+                    if re.search(r"-[a-z0-9]+$", url_base, re.IGNORECASE):
+                        urls_alvo.append(u_completa)
+                        
         except Exception as e:
             print(f"❌ Erro ao buscar lista de leilões: {e}")
             urls_alvo = []
@@ -269,5 +289,4 @@ def raspar_leiloes_tjsp(urls_alvo: list = None) -> list:
     return resultados
 
 if __name__ == "__main__":
-    # Teste local direto
     raspar_leiloes_tjsp()
