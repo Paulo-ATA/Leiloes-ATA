@@ -193,6 +193,12 @@ def salvar_no_banco(lotes: list):
         conn = psycopg2.connect(db_url)
         cur = conn.cursor()
 
+        # Proteção contra duplicatas no mesmo lote de execução
+        lotes_unicos = {}
+        for item in lotes:
+            proc_key = item["leilao"]["numero_processo"]
+            lotes_unicos[proc_key] = item
+
         query = """
         INSERT INTO leiloes (
             numero_processo, tribunal, vara_origem, titulo, tipo_imovel,
@@ -207,7 +213,7 @@ def salvar_no_banco(lotes: list):
         """
 
         valores = []
-        for item in lotes:
+        for item in lotes_unicos.values():
             imovel = item["imovel"]
             leilao = item["leilao"]
             valores.append((
@@ -229,7 +235,7 @@ def salvar_no_banco(lotes: list):
         conn.commit()
         cur.close()
         conn.close()
-        logging.info(f"✅ {len(lotes)} oportunidades reais salvas/atualizadas no Supabase com sucesso!")
+        logging.info(f"✅ {len(valores)} oportunidades reais salvas/atualizadas no Supabase com sucesso!")
 
     except Exception as e:
         logging.error(f"❌ Erro ao salvar dados no Supabase: {e}")
