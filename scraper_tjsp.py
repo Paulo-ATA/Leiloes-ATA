@@ -57,7 +57,7 @@ def raspar_leiloes_tjsp() -> list:
             proc = extrair_processo(texto_card)
             if not proc:
                 slug_lote = link_lote.rstrip("/").split("/")[-1]
-                proc = f"MEGA-{slug_lote}"
+                proc = f"MEGA-{slug_lote[:35]}"
 
             # Extração dos valores financeiros
             val_av_match = re.search(r"Avaliação:\s*R\$\s*([\d\.,]+)", texto_card, re.IGNORECASE)
