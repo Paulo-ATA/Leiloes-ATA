@@ -60,7 +60,7 @@ def extrair_bairro(titulo: str, endereco: str) -> str:
     return "Araçatuba"
 
 def extrair_hastas_pagina(textos_visiveis: list, val_avaliacao: float) -> list:
-    """Extrai hastas varrendo a lista de textos visíveis por proximidade."""
+    """Extrai hastas varrendo a lista de textos visíveis por proximidade de forma robusta."""
     hastas = []
     
     data_1a = None
@@ -71,24 +71,34 @@ def extrair_hastas_pagina(textos_visiveis: list, val_avaliacao: float) -> list:
     for i, texto in enumerate(textos_visiveis):
         texto_lower = texto.lower()
 
+        # Gatilho: 1ª Praça
         if re.search(r"1[ªºa]\s*(pra[çc]a|leil[ãa]o|etapa)|primeiro\s+leil[ãa]o", texto_lower):
-            for j in range(1, 16):
+            for j in range(1, 20):
                 if i + j < len(textos_visiveis):
-                    if not data_1a and re.search(r"\d{2}/\d{2}/\d{4}", textos_visiveis[i+j]):
-                        data_1a = fmt_data_iso(textos_visiveis[i+j])
-                    if valor_1a == 0.0 and "R$" in textos_visiveis[i+j]:
-                        valor_1a = parse_valor_br(textos_visiveis[i+j])
+                    t = textos_visiveis[i+j]
+                    if not data_1a and re.search(r"\d{2}/\d{2}/\d{4}", t):
+                        data_1a = fmt_data_iso(t)
+                    if valor_1a == 0.0:
+                        val = parse_valor_br(t)
+                        # Aceita se tiver formato monetário válido (contém vírgula ou ponto de milhar e dígitos)
+                        if val > 0 and ("," in t or "." in t) and not re.search(r"\d{2}/\d{2}/\d{4}", t):
+                            valor_1a = val
 
+        # Gatilho: 2ª Praça
         if re.search(r"2[ªºa]\s*(pra[çc]a|leil[ãa]o|etapa)|segundo\s+leil[ãa]o", texto_lower):
-            for j in range(1, 16):
+            for j in range(1, 20):
                 if i + j < len(textos_visiveis):
-                    if not data_2a and re.search(r"\d{2}/\d{2}/\d{4}", textos_visiveis[i+j]):
-                        data_2a = fmt_data_iso(textos_visiveis[i+j])
-                    if valor_2a == 0.0 and "R$" in textos_visiveis[i+j]:
-                        valor_2a = parse_valor_br(textos_visiveis[i+j])
+                    t = textos_visiveis[i+j]
+                    if not data_2a and re.search(r"\d{2}/\d{2}/\d{4}", t):
+                        data_2a = fmt_data_iso(t)
+                    if valor_2a == 0.0:
+                        val = parse_valor_br(t)
+                        if val > 0 and ("," in t or "." in t) and not re.search(r"\d{2}/\d{2}/\d{4}", t):
+                            valor_2a = val
 
     base_avaliacao = valor_1a if valor_1a > 0 else val_avaliacao
 
+    # Montagem da 1ª Hasta
     if data_1a or valor_1a > 0:
         desagio = round(((base_avaliacao - valor_1a) / base_avaliacao) * 100, 2) if base_avaliacao > 0 and valor_1a > 0 else 0.0
         hastas.append({
@@ -100,6 +110,7 @@ def extrair_hastas_pagina(textos_visiveis: list, val_avaliacao: float) -> list:
             "percentual_desagio": max(desagio, 0.0)
         })
 
+    # Montagem da 2ª Hasta
     if data_2a or valor_2a > 0:
         desagio = round(((base_avaliacao - valor_2a) / base_avaliacao) * 100, 2) if base_avaliacao > 0 and valor_2a > 0 else 0.0
         hastas.append({
@@ -111,14 +122,16 @@ def extrair_hastas_pagina(textos_visiveis: list, val_avaliacao: float) -> list:
             "percentual_desagio": max(desagio, 0.0)
         })
 
+    # Fallback para Extrajudicial (Hasta Única)
     if not hastas:
         data_unica = None
         valor_unico = 0.0
         for i, texto in enumerate(textos_visiveis):
-            if "R$" in texto and valor_unico == 0.0:
+            if valor_unico == 0.0:
+                val = parse_valor_br(texto)
                 contexto_previo = " ".join(textos_visiveis[max(0, i-4):i+1]).lower()
-                if any(t in contexto_previo for t in ["inicial", "mínimo", "atual", "lance", "partir"]):
-                    valor_unico = parse_valor_br(texto)
+                if val > 0 and any(t in contexto_previo for t in ["inicial", "mínimo", "atual", "lance", "partir"]):
+                    valor_unico = val
             if not data_unica and re.search(r"\d{2}/\d{2}/\d{4}", texto):
                 contexto_previo = " ".join(textos_visiveis[max(0, i-4):i+1]).lower()
                 if any(t in contexto_previo for t in ["encerramento", "data", "fim", "leilão"]):
