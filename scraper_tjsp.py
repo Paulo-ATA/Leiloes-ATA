@@ -1,7 +1,8 @@
 """
 RASPADOR DE LEILÕES DE IMÓVEIS (ARAÇATUBA/SP) - TJSP & EXTRAJUDICIAL
 -------------------------------------------------------------------
-Versão Corrigida: Captura estruturada de praças/hastas, valores e datas.
+Versão Corrigida: Mapeamento explícito de tribunal, código limpo para 
+processos extrajudiciais e captura resiliente de hastas via seletores e regex.
 """
 
 import os
@@ -65,22 +66,21 @@ def extrair_bairro(titulo: str, endereco: str) -> str:
 
     return "Araçatuba"
 
-def extrair_hastas_pagina(texto_linhas: str, val_avaliacao: float) -> list:
+def extrair_hastas_pagina(texto_unificado: str, val_avaliacao: float) -> list:
     """
-    Extrai 1ª e 2ª praça analisando a proximidade de datas e valores
-    no texto com quebras de linha preservadas.
+    Extrai hastas/praças analisando o texto em linha única contínua.
     """
     hastas = []
 
     # 1. Busca por 1ª Praça / 1º Leilão
-    match_1a = re.search(
-        r"(?:1ª|1º|1a)\s*(?:Praça|Hasta|Leilã[o0]|Praça/Hasta).*?(\d{2}/\d{2}/\d{4}[^\n\r]*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
-        texto_linhas,
-        re.IGNORECASE | re.DOTALL
+    m1 = re.search(
+        r"(?:1[ªºa]\s*(?:Praça|Hasta|Leilã[o0]|Etapa)|1º\s*Leilã[o0]).*?(\d{2}/\d{2}/\d{4}[^\d]*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
+        texto_unificado,
+        re.IGNORECASE
     )
-    if match_1a:
-        dt_iso = fmt_data_iso(match_1a.group(1))
-        v_lance = parse_valor_br(match_1a.group(2))
+    if m1:
+        dt_iso = fmt_data_iso(m1.group(1))
+        v_lance = parse_valor_br(m1.group(2))
         desagio = round(((val_avaliacao - v_lance) / val_avaliacao) * 100, 2) if val_avaliacao > 0 else 0.0
         hastas.append({
             "numero_hasta": 1,
@@ -92,14 +92,14 @@ def extrair_hastas_pagina(texto_linhas: str, val_avaliacao: float) -> list:
         })
 
     # 2. Busca por 2ª Praça / 2º Leilão
-    match_2a = re.search(
-        r"(?:2ª|2º|2a)\s*(?:Praça|Hasta|Leilã[o0]|Praça/Hasta).*?(\d{2}/\d{2}/\d{4}[^\n\r]*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
-        texto_linhas,
-        re.IGNORECASE | re.DOTALL
+    m2 = re.search(
+        r"(?:2[ªºa]\s*(?:Praça|Hasta|Leilã[o0]|Etapa)|2º\s*Leilã[o0]).*?(\d{2}/\d{2}/\d{4}[^\d]*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
+        texto_unificado,
+        re.IGNORECASE
     )
-    if match_2a:
-        dt_iso = fmt_data_iso(match_2a.group(1))
-        v_lance = parse_valor_br(match_2a.group(2))
+    if m2:
+        dt_iso = fmt_data_iso(m2.group(1))
+        v_lance = parse_valor_br(m2.group(2))
         desagio = round(((val_avaliacao - v_lance) / val_avaliacao) * 100, 2) if val_avaliacao > 0 else 0.0
         hastas.append({
             "numero_hasta": 2,
@@ -110,16 +110,16 @@ def extrair_hastas_pagina(texto_linhas: str, val_avaliacao: float) -> list:
             "percentual_desagio": max(desagio, 0.0)
         })
 
-    # 3. Fallback para Leilões Extrajudiciais (Valor inicial)
+    # 3. Fallback para estrutura simplificada (ex: Valor Inicial ou Lance Mínimo único)
     if not hastas:
-        match_ini = re.search(r"Valor\s+inicial[^\d]*?R\$\s*([\d\.,]+)", texto_linhas, re.IGNORECASE)
-        match_data = re.search(r"(?:Data|Encerramento|Fim)[^\d]*?(\d{2}/\d{2}/\d{4}[^\n\r]*?\d{2}:\d{2})", texto_linhas, re.IGNORECASE)
+        m_lance = re.search(r"(?:Lance\s+M[íi]nimo|Valor\s+Inicial|Maior\s+Lance)[^\d]*?R\$\s*([\d\.,]+)", texto_unificado, re.IGNORECASE)
+        m_data = re.search(r"(\d{2}/\d{2}/\d{4}[^\d]*?\d{2}:\d{2})", texto_unificado)
 
-        if match_ini or match_data:
-            v_lance = parse_valor_br(match_ini.group(1)) if match_ini else val_avaliacao
-            dt_iso = fmt_data_iso(match_data.group(1)) if match_data else ""
+        v_lance = parse_valor_br(m_lance.group(1)) if m_lance else val_avaliacao
+        dt_iso = fmt_data_iso(m_data.group(1)) if m_data else ""
+
+        if v_lance > 0 or dt_iso:
             desagio = round(((val_avaliacao - v_lance) / val_avaliacao) * 100, 2) if val_avaliacao > 0 and v_lance > 0 else 0.0
-
             hastas.append({
                 "numero_hasta": 2,
                 "data_inicio": dt_iso,
@@ -140,37 +140,37 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
 
         soup = BeautifulSoup(resp.text, "html.parser")
         
-        # Obtém texto preservando quebras de linha estruturais
-        texto_linhas = soup.get_text("\n", strip=True)
-        texto_limpo_linha = re.sub(r"[ \t]+", " ", texto_linhas)
+        # Texto unificado em linha única contínua para evitar falhas por quebra de tag
+        texto_unificado = re.sub(r"\s+", " ", soup.get_text(" ")).strip()
 
         # 1. Título do Lote
         titulo_tag = soup.select_one("h1, .instance-title, .card-title")
         titulo = titulo_tag.get_text(strip=True) if titulo_tag else "Imóvel em Leilão em Araçatuba/SP"
 
         # 2. Endereço e Bairro
-        match_end = re.search(r"(?:Rua|Av|Avenida|Praça|Alameda)[^,\n]+,[^,\n]+,[^,\n]+, Araçatuba, SP", texto_limpo_linha, re.IGNORECASE)
+        match_end = re.search(r"(?:Rua|Av|Avenida|Praça|Alameda)[^,\n]+,[^,\n]+,[^,\n]+, Araçatuba, SP", texto_unificado, re.IGNORECASE)
         endereco = match_end.group(0) if match_end else ""
         bairro = extrair_bairro(titulo, endereco)
 
-        # 3. Natureza: Judicial vs. Extrajudicial
-        match_proc = re.search(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", texto_limpo_linha)
-        is_extrajudicial = False if match_proc else ("extrajudicial" in titulo.lower() or "comitente" in texto_limpo_linha.lower())
+        # 3. Identificação da Natureza, Processo e Tribunal
+        match_proc = re.search(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", texto_unificado)
+        is_extrajudicial = False if match_proc else ("extrajudicial" in titulo.lower() or "comitente" in texto_unificado.lower())
 
         if is_extrajudicial:
-            match_comitente = re.search(r"Comitente[^\w]*([A-Za-z0-9\s\.\-S\/A]+?)(?:Extrajudicial|Valor|Aberto|Datas|Início|\n)", texto_limpo_linha, re.IGNORECASE)
+            match_comitente = re.search(r"Comitente[^\w]*([A-Za-z0-9\s\.\-S\/A]+?)(?:Extrajudicial|Valor|Aberto|Datas|Início|Data|\s{2,})", texto_unificado, re.IGNORECASE)
             comitente = match_comitente.group(1).strip() if match_comitente else "Instituição Financeira"
-            slug = url_lote.split("?")[0].rstrip("/").split("/")[-1]
-            num_processo = f"EXTRA-{slug[:20]}"
+            
+            # Extrai o código do lote no final da URL para compor o identificador único
+            codigo_lote = url_lote.split("?")[0].rstrip("/").split("-")[-1].upper()
+            num_processo = f"EXTRA-{codigo_lote}"
             vara_origem = f"Alienação Fiduciária ({comitente})"
+            tribunal = "Extrajudicial"
             debitos_subrogados = False
         else:
             num_processo = match_proc.group(0) if match_proc else "NÃO INFORMADO"
-            match_vara = re.search(r"(\d+ª\s+Vara\s+C[íi]vel[^\n,\.]*Comarca\s+de\s+Araçatuba/SP)", texto_limpo_linha, re.IGNORECASE)
-            if match_vara:
-                vara_origem = match_vara.group(1).strip()
-            else:
-                vara_origem = "Vara Cível de Araçatuba/SP"
+            match_vara = re.search(r"(\d+ª\s+Vara\s+C[íi]vel[^\n,\.]*Comarca\s+de\s+Araçatuba/SP)", texto_unificado, re.IGNORECASE)
+            vara_origem = match_vara.group(1).strip() if match_vara else "Vara Cível de Araçatuba/SP"
+            tribunal = "TJSP"
             debitos_subrogados = True
 
         # 4. Links Úteis (Edital em PDF)
@@ -181,16 +181,24 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
             if not link_edital.startswith("http"):
                 link_edital = f"https://www.megaleiloes.com.br{link_edital}"
 
-        # 5. Valor de Avaliação
-        match_av = re.search(r"Valor\s+de\s+Avalia[çc][ãa]o[^\d]*?R\$\s*([\d\.,]+)", texto_limpo_linha, re.IGNORECASE)
-        val_avaliacao = parse_valor_br(match_av.group(1)) if match_av else 0.0
+        # 5. Valor de Avaliação (Tentativa via seletores CSS e fallback via Regex)
+        val_avaliacao = 0.0
+        val_elem = soup.select_one(".instance-valuation, .valor-avaliacao, .avaliacao")
+        if val_elem:
+            val_avaliacao = parse_valor_br(val_elem.get_text())
 
-        # 6. Extração das Praças
-        hastas = extrair_hastas_pagina(texto_limpo_linha, val_avaliacao)
+        if val_avaliacao == 0.0:
+            match_av = re.search(r"(?:Valor\s+de\s+Avalia[çc][ãa]o|Avalia[çc][ãa]o)[^\d]*?R\$\s*([\d\.,]+)", texto_unificado, re.IGNORECASE)
+            if match_av:
+                val_avaliacao = parse_valor_br(match_av.group(1))
+
+        # 6. Extração das Hastas / Praças
+        hastas = extrair_hastas_pagina(texto_unificado, val_avaliacao)
 
         return {
             "numero_processo": num_processo,
             "vara_origem": vara_origem,
+            "tribunal": tribunal,
             "titulo": titulo,
             "tipo_imovel": "IMÓVEL",
             "bairro": bairro,
@@ -210,7 +218,7 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
         return {}
 
 def salvar_no_supabase(dados: dict):
-    """Insere ou atualiza um imóvel no Supabase."""
+    """Insere ou atualiza um imóvel no Supabase enviando explicitamente o campo tribunal."""
     if not dados or not DATABASE_URL:
         return
 
@@ -220,17 +228,18 @@ def salvar_no_supabase(dados: dict):
 
         query = """
         INSERT INTO leiloes (
-            numero_processo, vara_origem, titulo, tipo_imovel, bairro, cidade,
+            numero_processo, vara_origem, tribunal, titulo, tipo_imovel, bairro, cidade,
             status_ocupacao, nome_leiloeiro, link_lote, link_edital,
             valor_debitos_iptu, valor_debitos_condominio, debitos_subrogados,
             hastas_json, updated_at
         ) VALUES (
-            %(numero_processo)s, %(vara_origem)s, %(titulo)s, %(tipo_imovel)s, %(bairro)s, %(cidade)s,
+            %(numero_processo)s, %(vara_origem)s, %(tribunal)s, %(titulo)s, %(tipo_imovel)s, %(bairro)s, %(cidade)s,
             %(status_ocupacao)s, %(nome_leiloeiro)s, %(link_lote)s, %(link_edital)s,
             %(valor_debitos_iptu)s, %(valor_debitos_condominio)s, %(debitos_subrogados)s,
             %(hastas_json)s, NOW()
         )
         ON CONFLICT (numero_processo) DO UPDATE SET
+            tribunal = EXCLUDED.tribunal,
             titulo = EXCLUDED.titulo,
             bairro = EXCLUDED.bairro,
             vara_origem = EXCLUDED.vara_origem,
