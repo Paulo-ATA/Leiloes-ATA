@@ -1,8 +1,8 @@
 """
 RASPADOR DE LEILÕES DE IMÓVEIS (ARAÇATUBA/SP) - TJSP & EXTRAJUDICIAL
 -------------------------------------------------------------------
-Versão 3: Uso de Pipe Separator (|) para estruturação de texto e 
-expressões regulares não-gulosas (non-greedy) para evitar duplicações.
+Versão 4: Substituição de Regex em bloco por varredura estrutural
+(stripped_strings) atuando como "radar" de proximidade.
 """
 
 import os
@@ -36,11 +36,17 @@ def fmt_data_iso(data_str: str) -> str:
     if not data_str:
         return ""
     try:
-        match = re.search(r"(\d{2}/\d{2}/\d{4})[^\d]*(\d{2}:\d{2})", data_str)
-        if match:
-            dt_raw = f"{match.group(1)} {match.group(2)}"
-            dt = datetime.strptime(dt_raw, "%d/%m/%Y %H:%M")
+        # Tenta casar Data + Hora
+        match_dt = re.search(r"(\d{2}/\d{2}/\d{4})[^\d]*(\d{2}:\d{2})", data_str)
+        if match_dt:
+            dt = datetime.strptime(f"{match_dt.group(1)} {match_dt.group(2)}", "%d/%m/%Y %H:%M")
             return dt.strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Tenta casar apenas Data (fallback)
+        match_d = re.search(r"(\d{2}/\d{2}/\d{4})", data_str)
+        if match_d:
+            dt = datetime.strptime(match_d.group(1), "%d/%m/%Y")
+            return dt.strftime("%Y-%m-%d 00:00:00")
     except Exception:
         pass
     return data_str
@@ -60,67 +66,86 @@ def extrair_bairro(titulo: str, endereco: str) -> str:
                 return candidato.title()
     return "Araçatuba"
 
-def extrair_hastas_pagina(texto_blocos: str, val_avaliacao: float) -> list:
-    """Extrai hastas navegando pelos blocos separados por pipe (|)"""
+def extrair_hastas_pagina(textos_visiveis: list, val_avaliacao: float) -> list:
+    """Extrai hastas varrendo a lista de textos visíveis por proximidade."""
     hastas = []
+    
+    data_1a = None
+    valor_1a = 0.0
+    data_2a = None
+    valor_2a = 0.0
 
-    # Busca 1ª Praça
-    m1 = re.search(
-        r"(?:1[ªºa]\s*(?:Praça|Leilã[o0]|Hasta)|Primeiro\s+Leilão).*?(\d{2}/\d{2}/\d{4}.*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
-        texto_blocos,
-        re.IGNORECASE
-    )
-    if m1:
-        dt_iso = fmt_data_iso(m1.group(1))
-        v_lance = parse_valor_br(m1.group(2))
-        desagio = round(((val_avaliacao - v_lance) / val_avaliacao) * 100, 2) if val_avaliacao > 0 else 0.0
+    # Varredura para Judicial (1ª e 2ª Praças)
+    for i, texto in enumerate(textos_visiveis):
+        texto_lower = texto.lower()
+
+        # Gatilho: 1ª Praça
+        if re.search(r"1[ªºa]\s*(pra[çc]a|leil[ãa]o|etapa)|primeiro\s+leil[ãa]o", texto_lower):
+            for j in range(1, 16):
+                if i + j < len(textos_visiveis):
+                    if not data_1a and re.search(r"\d{2}/\d{2}/\d{4}", textos_visiveis[i+j]):
+                        data_1a = fmt_data_iso(textos_visiveis[i+j])
+                    if valor_1a == 0.0 and "R$" in textos_visiveis[i+j]:
+                        valor_1a = parse_valor_br(textos_visiveis[i+j])
+
+        # Gatilho: 2ª Praça
+        if re.search(r"2[ªºa]\s*(pra[çc]a|leil[ãa]o|etapa)|segundo\s+leil[ãa]o", texto_lower):
+            for j in range(1, 16):
+                if i + j < len(textos_visiveis):
+                    if not data_2a and re.search(r"\d{2}/\d{2}/\d{4}", textos_visiveis[i+j]):
+                        data_2a = fmt_data_iso(textos_visiveis[i+j])
+                    if valor_2a == 0.0 and "R$" in textos_visiveis[i+j]:
+                        valor_2a = parse_valor_br(textos_visiveis[i+j])
+
+    # Montagem do Judicial
+    if data_1a or valor_1a > 0:
+        desagio = round(((val_avaliacao - valor_1a) / val_avaliacao) * 100, 2) if val_avaliacao > 0 and valor_1a > 0 else 0.0
         hastas.append({
             "numero_hasta": 1,
-            "data_inicio": dt_iso,
-            "data_fim": dt_iso,
+            "data_inicio": data_1a or "",
+            "data_fim": data_1a or "",
             "valor_avaliacao": val_avaliacao,
-            "valor_lance_minimo": v_lance,
+            "valor_lance_minimo": valor_1a if valor_1a > 0 else val_avaliacao,
             "percentual_desagio": max(desagio, 0.0)
         })
 
-    # Busca 2ª Praça
-    m2 = re.search(
-        r"(?:2[ªºa]\s*(?:Praça|Leilã[o0]|Hasta)|Segundo\s+Leilão).*?(\d{2}/\d{2}/\d{4}.*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
-        texto_blocos,
-        re.IGNORECASE
-    )
-    if m2:
-        dt_iso = fmt_data_iso(m2.group(1))
-        v_lance = parse_valor_br(m2.group(2))
-        desagio = round(((val_avaliacao - v_lance) / val_avaliacao) * 100, 2) if val_avaliacao > 0 else 0.0
+    if data_2a or valor_2a > 0:
+        desagio = round(((val_avaliacao - valor_2a) / val_avaliacao) * 100, 2) if val_avaliacao > 0 and valor_2a > 0 else 0.0
         hastas.append({
             "numero_hasta": 2,
-            "data_inicio": dt_iso,
-            "data_fim": dt_iso,
+            "data_inicio": data_2a or "",
+            "data_fim": data_2a or "",
             "valor_avaliacao": val_avaliacao,
-            "valor_lance_minimo": v_lance,
+            "valor_lance_minimo": valor_2a if valor_2a > 0 else val_avaliacao,
             "percentual_desagio": max(desagio, 0.0)
         })
 
-    # Fallback (Geralmente usado no Extrajudicial)
+    # Fallback para Extrajudicial (Hasta Única / Lance Inicial)
     if not hastas:
-        m_lance = re.search(r"(?:Lance\s+M[íi]nimo|Valor\s+Inicial|Maior\s+Lance|Valor)[^|]*?\|\s*R\$\s*([\d\.,]+)", texto_blocos, re.IGNORECASE)
-        m_data = re.search(r"(\d{2}/\d{2}/\d{4}[^\d]*?\d{2}:\d{2})", texto_blocos)
-
-        if m_lance or m_data:
-            v_lance = parse_valor_br(m_lance.group(1)) if m_lance else val_avaliacao
-            dt_iso = fmt_data_iso(m_data.group(1)) if m_data else ""
-            desagio = round(((val_avaliacao - v_lance) / val_avaliacao) * 100, 2) if val_avaliacao > 0 and v_lance > 0 else 0.0
+        data_unica = None
+        valor_unico = 0.0
+        
+        for i, texto in enumerate(textos_visiveis):
+            if "R$" in texto and valor_unico == 0.0:
+                contexto_previo = " ".join(textos_visiveis[max(0, i-4):i+1]).lower()
+                if any(t in contexto_previo for t in ["inicial", "mínimo", "atual", "lance", "partir"]):
+                    valor_unico = parse_valor_br(texto)
             
-            if v_lance > 0 or dt_iso:
-                hastas.append({
-                    "numero_hasta": 2,
-                    "data_inicio": dt_iso,
-                    "data_fim": dt_iso,
-                    "valor_avaliacao": val_avaliacao,
-                    "valor_lance_minimo": v_lance,
-                    "percentual_desagio": max(desagio, 0.0)
-                })
+            if not data_unica and re.search(r"\d{2}/\d{2}/\d{4}", texto):
+                contexto_previo = " ".join(textos_visiveis[max(0, i-4):i+1]).lower()
+                if any(t in contexto_previo for t in ["encerramento", "data", "fim", "leilão"]):
+                    data_unica = fmt_data_iso(texto)
+
+        if data_unica or valor_unico > 0:
+            desagio = round(((val_avaliacao - valor_unico) / val_avaliacao) * 100, 2) if val_avaliacao > 0 and valor_unico > 0 else 0.0
+            hastas.append({
+                "numero_hasta": 1,
+                "data_inicio": data_unica or "",
+                "data_fim": data_unica or "",
+                "valor_avaliacao": val_avaliacao,
+                "valor_lance_minimo": valor_unico if valor_unico > 0 else val_avaliacao,
+                "percentual_desagio": max(desagio, 0.0)
+            })
 
     return hastas
 
@@ -132,27 +157,23 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
 
         soup = BeautifulSoup(resp.text, "html.parser")
         
-        # O PULO DO GATO: Separa todos os elementos HTML por " | "
-        texto_blocos = soup.get_text(" | ", strip=True)
+        # Lista estruturada de todos os fragmentos visíveis no site
+        textos_visiveis = list(soup.stripped_strings)
+        texto_blocos = " | ".join(textos_visiveis)
 
-        # 1. Título do Lote
         titulo_tag = soup.select_one("h1, .instance-title, .card-title")
         titulo = titulo_tag.get_text(strip=True) if titulo_tag else "Imóvel em Leilão em Araçatuba/SP"
 
-        # 2. Endereço e Bairro
         match_end = re.search(r"(?:Rua|Av|Avenida|Praça|Alameda)[^|]+,[^|]+,[^|]+, Araçatuba, SP", texto_blocos, re.IGNORECASE)
         endereco = match_end.group(0) if match_end else ""
         bairro = extrair_bairro(titulo, endereco)
 
-        # 3. Natureza, Processo e Tribunal
         match_proc = re.search(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", texto_blocos)
         is_extrajudicial = False if match_proc else ("extrajudicial" in titulo.lower() or "comitente" in texto_blocos.lower())
 
         if is_extrajudicial:
-            # Captura o comitente ancorado no pipe (|)
             match_comitente = re.search(r"Comitente(?:.*?\|\s*|\s*:\s*)([A-Za-z0-9\s\.\-S\/A]+?)(?:\s*\||\s+CNPJ)", texto_blocos, re.IGNORECASE)
             comitente = match_comitente.group(1).strip() if match_comitente else "Instituição Financeira"
-            
             codigo_lote = url_lote.split("?")[0].rstrip("/").split("-")[-1].upper()
             num_processo = f"EXTRA-{codigo_lote}"
             vara_origem = f"Alienação Fiduciária ({comitente})"
@@ -160,13 +181,11 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
             debitos_subrogados = False
         else:
             num_processo = match_proc.group(0) if match_proc else "NÃO INFORMADO"
-            # O '?' torna a busca não-gulosa, parando na primeira ocorrência do nome da cidade para evitar duplicação
             match_vara = re.search(r"(\d+ª\s+Vara\s+C[íi]vel.*?Comarca\s+de\s+Araçatuba(?:/SP)?)", texto_blocos, re.IGNORECASE)
             vara_origem = match_vara.group(1).strip() if match_vara else "Vara Cível de Araçatuba/SP"
             tribunal = "TJSP"
             debitos_subrogados = True
 
-        # 4. Links Úteis (Edital em PDF)
         link_edital = None
         edital_tag = soup.find("a", href=re.compile(r"edital.*\.pdf", re.IGNORECASE))
         if edital_tag:
@@ -174,20 +193,25 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
             if not link_edital.startswith("http"):
                 link_edital = f"https://www.megaleiloes.com.br{link_edital}"
 
-        # 5. Valor de Avaliação
+        # Valor de Avaliação com varredura por radar
         val_avaliacao = 0.0
-        match_av = re.search(r"(?:Valor\s+de\s+Avalia[çc][ãa]o|Avalia[çc][ãa]o)[^|]*?\|\s*R\$\s*([\d\.,]+)", texto_blocos, re.IGNORECASE)
-        if match_av:
-            val_avaliacao = parse_valor_br(match_av.group(1))
+        val_elem = soup.select_one(".instance-valuation, .valor-avaliacao, .avaliacao")
+        if val_elem:
+            val_avaliacao = parse_valor_br(val_elem.get_text())
 
-        # 6. Extração das Hastas
-        hastas = extrair_hastas_pagina(texto_blocos, val_avaliacao)
+        if val_avaliacao == 0.0:
+            for i, txt in enumerate(textos_visiveis):
+                if re.search(r"avalia[çc][ãa]o", txt.lower()):
+                    # Radar: Inspeciona até 6 fragmentos à frente buscando "R$"
+                    for j in range(1, 7):
+                        if i + j < len(textos_visiveis) and "R$" in textos_visiveis[i+j]:
+                            val_avaliacao = parse_valor_br(textos_visiveis[i+j])
+                            break
+                    if val_avaliacao > 0:
+                        break
+
+        hastas = extrair_hastas_pagina(textos_visiveis, val_avaliacao)
         
-        # DEBUG: Se as hastas continuarem vazias, o código vai imprimir o texto estruturado no console para auditoria visual
-        if not hastas:
-             print(f"\n⚠️ ALERTA! Hastas não encontradas para {num_processo}. Imprimindo blocos de texto capturados para análise:")
-             print(f"{texto_blocos[:1000]}...\n")
-
         return {
             "numero_processo": num_processo,
             "vara_origem": vara_origem,
