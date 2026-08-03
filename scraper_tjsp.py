@@ -1,8 +1,8 @@
 """
 RASPADOR DE LEILÕES DE IMÓVEIS (ARAÇATUBA/SP) - TJSP & EXTRAJUDICIAL
 -------------------------------------------------------------------
-Versão Corrigida: Mapeamento explícito de tribunal, código limpo para 
-processos extrajudiciais e captura resiliente de hastas via seletores e regex.
+Versão 3: Uso de Pipe Separator (|) para estruturação de texto e 
+expressões regulares não-gulosas (non-greedy) para evitar duplicações.
 """
 
 import os
@@ -12,7 +12,6 @@ import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
 import psycopg2
-from psycopg2.extras import RealDictCursor
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -25,7 +24,6 @@ HEADERS = {
 }
 
 def parse_valor_br(texto_valor: str) -> float:
-    """Converte valores no formato brasileiro 'R$ 123.456,78' para float."""
     if not texto_valor:
         return 0.0
     limpo = re.sub(r"[^\d,]", "", str(texto_valor)).replace(",", ".")
@@ -35,7 +33,6 @@ def parse_valor_br(texto_valor: str) -> float:
         return 0.0
 
 def fmt_data_iso(data_str: str) -> str:
-    """Converte datas para o formato ISO 'YYYY-MM-DD HH:MM:SS'."""
     if not data_str:
         return ""
     try:
@@ -49,33 +46,28 @@ def fmt_data_iso(data_str: str) -> str:
     return data_str
 
 def extrair_bairro(titulo: str, endereco: str) -> str:
-    """Extrai o bairro priorizando a linha de endereço ou o título do lote."""
     if endereco:
         partes_end = [p.strip() for p in endereco.split(",")]
         if len(partes_end) >= 4:
             candidato = partes_end[-3]
             if candidato.lower() not in ["sp", "araçatuba", "aracatuba", "centro"]:
                 return candidato.title()
-
     if titulo:
         partes_tit = [p.strip() for p in titulo.split("-")]
         if len(partes_tit) >= 3:
             candidato = partes_tit[-2]
             if candidato.lower() not in ["sp", "araçatuba", "aracatuba"]:
                 return candidato.title()
-
     return "Araçatuba"
 
-def extrair_hastas_pagina(texto_unificado: str, val_avaliacao: float) -> list:
-    """
-    Extrai hastas/praças analisando o texto em linha única contínua.
-    """
+def extrair_hastas_pagina(texto_blocos: str, val_avaliacao: float) -> list:
+    """Extrai hastas navegando pelos blocos separados por pipe (|)"""
     hastas = []
 
-    # 1. Busca por 1ª Praça / 1º Leilão
+    # Busca 1ª Praça
     m1 = re.search(
-        r"(?:1[ªºa]\s*(?:Praça|Hasta|Leilã[o0]|Etapa)|1º\s*Leilã[o0]).*?(\d{2}/\d{2}/\d{4}[^\d]*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
-        texto_unificado,
+        r"(?:1[ªºa]\s*(?:Praça|Leilã[o0]|Hasta)|Primeiro\s+Leilão).*?(\d{2}/\d{2}/\d{4}.*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
+        texto_blocos,
         re.IGNORECASE
     )
     if m1:
@@ -91,10 +83,10 @@ def extrair_hastas_pagina(texto_unificado: str, val_avaliacao: float) -> list:
             "percentual_desagio": max(desagio, 0.0)
         })
 
-    # 2. Busca por 2ª Praça / 2º Leilão
+    # Busca 2ª Praça
     m2 = re.search(
-        r"(?:2[ªºa]\s*(?:Praça|Hasta|Leilã[o0]|Etapa)|2º\s*Leilã[o0]).*?(\d{2}/\d{2}/\d{4}[^\d]*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
-        texto_unificado,
+        r"(?:2[ªºa]\s*(?:Praça|Leilã[o0]|Hasta)|Segundo\s+Leilão).*?(\d{2}/\d{2}/\d{4}.*?\d{2}:\d{2}).*?R\$\s*([\d\.,]+)",
+        texto_blocos,
         re.IGNORECASE
     )
     if m2:
@@ -110,29 +102,29 @@ def extrair_hastas_pagina(texto_unificado: str, val_avaliacao: float) -> list:
             "percentual_desagio": max(desagio, 0.0)
         })
 
-    # 3. Fallback para estrutura simplificada (ex: Valor Inicial ou Lance Mínimo único)
+    # Fallback (Geralmente usado no Extrajudicial)
     if not hastas:
-        m_lance = re.search(r"(?:Lance\s+M[íi]nimo|Valor\s+Inicial|Maior\s+Lance)[^\d]*?R\$\s*([\d\.,]+)", texto_unificado, re.IGNORECASE)
-        m_data = re.search(r"(\d{2}/\d{2}/\d{4}[^\d]*?\d{2}:\d{2})", texto_unificado)
+        m_lance = re.search(r"(?:Lance\s+M[íi]nimo|Valor\s+Inicial|Maior\s+Lance|Valor)[^|]*?\|\s*R\$\s*([\d\.,]+)", texto_blocos, re.IGNORECASE)
+        m_data = re.search(r"(\d{2}/\d{2}/\d{4}[^\d]*?\d{2}:\d{2})", texto_blocos)
 
-        v_lance = parse_valor_br(m_lance.group(1)) if m_lance else val_avaliacao
-        dt_iso = fmt_data_iso(m_data.group(1)) if m_data else ""
-
-        if v_lance > 0 or dt_iso:
+        if m_lance or m_data:
+            v_lance = parse_valor_br(m_lance.group(1)) if m_lance else val_avaliacao
+            dt_iso = fmt_data_iso(m_data.group(1)) if m_data else ""
             desagio = round(((val_avaliacao - v_lance) / val_avaliacao) * 100, 2) if val_avaliacao > 0 and v_lance > 0 else 0.0
-            hastas.append({
-                "numero_hasta": 2,
-                "data_inicio": dt_iso,
-                "data_fim": dt_iso,
-                "valor_avaliacao": val_avaliacao,
-                "valor_lance_minimo": v_lance,
-                "percentual_desagio": max(desagio, 0.0)
-            })
+            
+            if v_lance > 0 or dt_iso:
+                hastas.append({
+                    "numero_hasta": 2,
+                    "data_inicio": dt_iso,
+                    "data_fim": dt_iso,
+                    "valor_avaliacao": val_avaliacao,
+                    "valor_lance_minimo": v_lance,
+                    "percentual_desagio": max(desagio, 0.0)
+                })
 
     return hastas
 
 def raspar_detalhes_lote(url_lote: str) -> dict:
-    """Raspagem minuciosa de uma página individual de lote."""
     try:
         resp = requests.get(url_lote, headers=HEADERS, timeout=12)
         if resp.status_code != 200:
@@ -140,27 +132,27 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
 
         soup = BeautifulSoup(resp.text, "html.parser")
         
-        # Texto unificado em linha única contínua para evitar falhas por quebra de tag
-        texto_unificado = re.sub(r"\s+", " ", soup.get_text(" ")).strip()
+        # O PULO DO GATO: Separa todos os elementos HTML por " | "
+        texto_blocos = soup.get_text(" | ", strip=True)
 
         # 1. Título do Lote
         titulo_tag = soup.select_one("h1, .instance-title, .card-title")
         titulo = titulo_tag.get_text(strip=True) if titulo_tag else "Imóvel em Leilão em Araçatuba/SP"
 
         # 2. Endereço e Bairro
-        match_end = re.search(r"(?:Rua|Av|Avenida|Praça|Alameda)[^,\n]+,[^,\n]+,[^,\n]+, Araçatuba, SP", texto_unificado, re.IGNORECASE)
+        match_end = re.search(r"(?:Rua|Av|Avenida|Praça|Alameda)[^|]+,[^|]+,[^|]+, Araçatuba, SP", texto_blocos, re.IGNORECASE)
         endereco = match_end.group(0) if match_end else ""
         bairro = extrair_bairro(titulo, endereco)
 
-        # 3. Identificação da Natureza, Processo e Tribunal
-        match_proc = re.search(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", texto_unificado)
-        is_extrajudicial = False if match_proc else ("extrajudicial" in titulo.lower() or "comitente" in texto_unificado.lower())
+        # 3. Natureza, Processo e Tribunal
+        match_proc = re.search(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b", texto_blocos)
+        is_extrajudicial = False if match_proc else ("extrajudicial" in titulo.lower() or "comitente" in texto_blocos.lower())
 
         if is_extrajudicial:
-            match_comitente = re.search(r"Comitente[^\w]*([A-Za-z0-9\s\.\-S\/A]+?)(?:Extrajudicial|Valor|Aberto|Datas|Início|Data|\s{2,})", texto_unificado, re.IGNORECASE)
+            # Captura o comitente ancorado no pipe (|)
+            match_comitente = re.search(r"Comitente(?:.*?\|\s*|\s*:\s*)([A-Za-z0-9\s\.\-S\/A]+?)(?:\s*\||\s+CNPJ)", texto_blocos, re.IGNORECASE)
             comitente = match_comitente.group(1).strip() if match_comitente else "Instituição Financeira"
             
-            # Extrai o código do lote no final da URL para compor o identificador único
             codigo_lote = url_lote.split("?")[0].rstrip("/").split("-")[-1].upper()
             num_processo = f"EXTRA-{codigo_lote}"
             vara_origem = f"Alienação Fiduciária ({comitente})"
@@ -168,7 +160,8 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
             debitos_subrogados = False
         else:
             num_processo = match_proc.group(0) if match_proc else "NÃO INFORMADO"
-            match_vara = re.search(r"(\d+ª\s+Vara\s+C[íi]vel[^\n,\.]*Comarca\s+de\s+Araçatuba/SP)", texto_unificado, re.IGNORECASE)
+            # O '?' torna a busca não-gulosa, parando na primeira ocorrência do nome da cidade para evitar duplicação
+            match_vara = re.search(r"(\d+ª\s+Vara\s+C[íi]vel.*?Comarca\s+de\s+Araçatuba(?:/SP)?)", texto_blocos, re.IGNORECASE)
             vara_origem = match_vara.group(1).strip() if match_vara else "Vara Cível de Araçatuba/SP"
             tribunal = "TJSP"
             debitos_subrogados = True
@@ -181,19 +174,19 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
             if not link_edital.startswith("http"):
                 link_edital = f"https://www.megaleiloes.com.br{link_edital}"
 
-        # 5. Valor de Avaliação (Tentativa via seletores CSS e fallback via Regex)
+        # 5. Valor de Avaliação
         val_avaliacao = 0.0
-        val_elem = soup.select_one(".instance-valuation, .valor-avaliacao, .avaliacao")
-        if val_elem:
-            val_avaliacao = parse_valor_br(val_elem.get_text())
+        match_av = re.search(r"(?:Valor\s+de\s+Avalia[çc][ãa]o|Avalia[çc][ãa]o)[^|]*?\|\s*R\$\s*([\d\.,]+)", texto_blocos, re.IGNORECASE)
+        if match_av:
+            val_avaliacao = parse_valor_br(match_av.group(1))
 
-        if val_avaliacao == 0.0:
-            match_av = re.search(r"(?:Valor\s+de\s+Avalia[çc][ãa]o|Avalia[çc][ãa]o)[^\d]*?R\$\s*([\d\.,]+)", texto_unificado, re.IGNORECASE)
-            if match_av:
-                val_avaliacao = parse_valor_br(match_av.group(1))
-
-        # 6. Extração das Hastas / Praças
-        hastas = extrair_hastas_pagina(texto_unificado, val_avaliacao)
+        # 6. Extração das Hastas
+        hastas = extrair_hastas_pagina(texto_blocos, val_avaliacao)
+        
+        # DEBUG: Se as hastas continuarem vazias, o código vai imprimir o texto estruturado no console para auditoria visual
+        if not hastas:
+             print(f"\n⚠️ ALERTA! Hastas não encontradas para {num_processo}. Imprimindo blocos de texto capturados para análise:")
+             print(f"{texto_blocos[:1000]}...\n")
 
         return {
             "numero_processo": num_processo,
@@ -218,14 +211,11 @@ def raspar_detalhes_lote(url_lote: str) -> dict:
         return {}
 
 def salvar_no_supabase(dados: dict):
-    """Insere ou atualiza um imóvel no Supabase enviando explicitamente o campo tribunal."""
     if not dados or not DATABASE_URL:
         return
-
     try:
         conn = psycopg2.connect(DATABASE_URL)
         cursor = conn.cursor()
-
         query = """
         INSERT INTO leiloes (
             numero_processo, vara_origem, tribunal, titulo, tipo_imovel, bairro, cidade,
@@ -255,12 +245,10 @@ def salvar_no_supabase(dados: dict):
         cursor.close()
         conn.close()
         print(f"✅ Salvo no Supabase: {dados['titulo']}")
-
     except Exception as e:
         print(f"❌ Erro ao salvar no Supabase: {e}")
 
 def raspar_leiloes_tjsp(urls_alvo: list = None) -> list:
-    """Função invocada pelo orquestrador scraper_aracatuba.py."""
     if not urls_alvo:
         url_busca = "https://www.megaleiloes.com.br/imoveis/sp/aracatuba"
         try:
@@ -269,7 +257,6 @@ def raspar_leiloes_tjsp(urls_alvo: list = None) -> list:
                 soup = BeautifulSoup(resp.text, "html.parser")
                 links = soup.find_all("a", href=re.compile(r"/imoveis/.*aracatuba", re.IGNORECASE))
                 todas_urls = list(set([l["href"] for l in links if "href" in l.attrs]))
-
                 urls_alvo = []
                 for u in todas_urls:
                     u_completa = u if u.startswith("http") else f"https://www.megaleiloes.com.br{u}"
@@ -279,7 +266,6 @@ def raspar_leiloes_tjsp(urls_alvo: list = None) -> list:
         except Exception as e:
             print(f"❌ Erro ao buscar lista de leilões: {e}")
             urls_alvo = []
-
     resultados = []
     for url in urls_alvo:
         print(f"🔍 Processando lote: {url}")
@@ -287,7 +273,6 @@ def raspar_leiloes_tjsp(urls_alvo: list = None) -> list:
         if dados:
             salvar_no_supabase(dados)
             resultados.append(dados)
-
     return resultados
 
 if __name__ == "__main__":
