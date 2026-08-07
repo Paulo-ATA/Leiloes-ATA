@@ -62,44 +62,57 @@ def extrair_bairro(titulo: str, endereco: str) -> str:
 import re
 from bs4 import BeautifulSoup
 
-def extrair_hastas_pagina(soup: BeautifulSoup, val_avaliacao: float) -> list:
+def extrair_hastas_pagina(soup_ou_conteudo, val_avaliacao: float) -> list:
     """
-    Extrai as praças/hastas analisando a estrutura HTML específica da Mega Leilões.
+    Extrai as praças/hastas lidando com múltiplos tipos de entrada (BeautifulSoup, str ou list).
     """
+    # 1. Normalização defensiva: Garante que a entrada vire um objeto BeautifulSoup válido
+    if isinstance(soup_ou_conteudo, list):
+        # Se for uma lista de elementos/strings, junta tudo em um HTML único
+        html_unificado = " ".join([str(item) for item in soup_ou_conteudo])
+        soup = BeautifulSoup(html_unificado, 'html.parser')
+    elif isinstance(soup_ou_conteudo, str):
+        soup = BeautifulSoup(soup_ou_conteudo, 'html.parser')
+    else:
+        soup = soup_ou_conteudo
+
     hastas = []
     
-    # Busca os blocos/cards de cada praça na página da Mega Leilões
-    blocos_praca = soup.find_all(['div', 'section'], class_=re.compile(r'instance|praca|batch-instance', re.I))
-    
-    # Se encontrou blocos estruturados na página
+    # 2. Busca os blocos de cada praça no HTML da Mega Leilões
+    blocos_praca = soup.find_all(['div', 'section', 'article'], class_=re.compile(r'instance|praca|batch-instance', re.I))
+
+    # Se não encontrou por classe específica, busca elementos que contenham títulos de praças
+    if not blocos_praca:
+        blocos_praca = [
+            tag for tag in soup.find_all(['div', 'section'])
+            if tag.find(string=re.compile(r'(1ª|2ª)\s*(Praça|Leilão)', re.I))
+        ]
+
     if blocos_praca:
         for idx, bloco in enumerate(blocos_praca, start=1):
             texto_bloco = bloco.get_text(separator=' ', strip=True)
             texto_lower = texto_bloco.lower()
 
-            # Evita processar blocos irrelevantes
-            if not any(k in texto_lower for k in ['1ª', '2ª', 'praça', 'leilão', 'lance mínimo', 'encerramento']):
+            # Descarta blocos irrelevantes do layout
+            if not any(k in texto_lower for k in ['1ª', '2ª', 'praça', 'leilão', 'lance mínimo', 'encerramento', 'valor']):
                 continue
 
-            # Busca Data do leilão no bloco
+            # Data do leilão
             data_match = re.search(r'\d{2}/\d{2}/\d{4}', texto_bloco)
             data_hasta = fmt_data_iso(data_match.group(0)) if data_match else ""
 
-            # Extrai valores monetários presentes EXCLUSIVAMENTE dentro deste bloco
+            # Extrai valores monetários presentes exclusivamente neste bloco
             matches_valores = re.findall(r'(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})', texto_bloco)
             valores_bloco = [parse_valor_br(v) for v in matches_valores if parse_valor_br(v) > 0]
 
             if not valores_bloco:
                 continue
 
-            # Lógica de seleção do lance mínimo do bloco
-            # Se houver mais de um valor, o lance mínimo é o menor valor significativo (evitando valores < 10.000 se o imóvel for grande)
             base_aval = val_avaliacao if val_avaliacao > 0 else max(valores_bloco)
             
-            # Filtra valores que representam de fato o imóvel (ex: > 30% da avaliação para evitar pegar incrementos de R$ 2.000)
+            # Antiruído: desconsidera valores abaixo de 30% da avaliação (incrementos/taxas)
             valores_validos = [v for v in valores_bloco if v >= (base_aval * 0.30)]
-            
-            lance_minimo = min(valores_validos) if valores_validos else (min(valores_bloco) if valores_bloco else base_aval)
+            lance_minimo = min(valores_validos) if valores_validos else min(valores_bloco)
 
             desagio = round(((base_aval - lance_minimo) / base_aval) * 100, 2) if base_aval > 0 else 0.0
 
@@ -112,11 +125,10 @@ def extrair_hastas_pagina(soup: BeautifulSoup, val_avaliacao: float) -> list:
                 "percentual_desagio": max(desagio, 0.0)
             })
 
-    # FALLBACK: Se o leilão for extrajudicial ou a estrutura HTML for simplificada (Hasta Única)
+    # FALLBACK: Para leilões extrajudiciais de Hasta Única ou páginas simplificadas
     if not hastas:
         texto_completo = soup.get_text(separator=' ', strip=True)
         
-        # Procura por lance inicial/mínimo
         match_valor = re.search(r'(?:lance\s*m[íi]nimo|lance\s*inicial|a\s*partir\s*de)\s*:?\s*(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})', texto_completo, re.I)
         valor_unico = parse_valor_br(match_valor.group(1)) if match_valor else val_avaliacao
         
