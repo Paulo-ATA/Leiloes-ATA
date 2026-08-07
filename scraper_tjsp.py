@@ -59,8 +59,13 @@ def extrair_bairro(titulo: str, endereco: str) -> str:
                 return candidato.title()
     return "Araçatuba"
 
+import re
+
 def extrair_hastas_pagina(textos_visiveis: list, val_avaliacao: float) -> list:
-    """Extrai hastas varrendo a lista de textos visíveis por proximidade de forma robusta."""
+    """
+    Extrai hastas varrendo os textos visíveis com análise contextual de rótulos 
+    (Lance Mínimo vs. Avaliação) e seleção de valor reduzido para 2ª praça.
+    """
     hastas = []
     
     data_1a = None
@@ -71,58 +76,91 @@ def extrair_hastas_pagina(textos_visiveis: list, val_avaliacao: float) -> list:
     for i, texto in enumerate(textos_visiveis):
         texto_lower = texto.lower()
 
-        # Gatilho: 1ª Praça
+        # -------------------------------------------------------------
+        # 1ª PRAÇA
+        # -------------------------------------------------------------
         if re.search(r"1[ªºa]\s*(pra[çc]a|leil[ãa]o|etapa)|primeiro\s+leil[ãa]o", texto_lower):
-            for j in range(1, 20):
-                if i + j < len(textos_visiveis):
-                    t = textos_visiveis[i+j]
-                    if not data_1a and re.search(r"\d{2}/\d{2}/\d{4}", t):
-                        data_1a = fmt_data_iso(t)
-                    if valor_1a == 0.0:
-                        val = parse_valor_br(t)
-                        # Aceita se tiver formato monetário válido (contém vírgula ou ponto de milhar e dígitos)
-                        if val > 0 and ("," in t or "." in t) and not re.search(r"\d{2}/\d{2}/\d{4}", t):
+            window = textos_visiveis[i+1 : min(i+25, len(textos_visiveis))]
+            for idx, t in enumerate(window):
+                # Data
+                if not data_1a and re.search(r"\d{2}/\d{2}/\d{4}", t):
+                    data_1a = fmt_data_iso(t)
+                
+                # Valor
+                val = parse_valor_br(t)
+                if val > 0 and ("," in t or "." in t) and not re.search(r"\d{2}/\d{2}/\d{4}", t):
+                    ctx = " ".join(window[max(0, idx-2):idx+1]).lower()
+                    if "avalia" not in ctx or valor_1a == 0.0:
+                        if valor_1a == 0.0 or re.search(r"m[íi]nimo|lance", ctx):
                             valor_1a = val
 
-        # Gatilho: 2ª Praça
+        # -------------------------------------------------------------
+        # 2ª PRAÇA
+        # -------------------------------------------------------------
         if re.search(r"2[ªºa]\s*(pra[çc]a|leil[ãa]o|etapa)|segundo\s+leil[ãa]o", texto_lower):
-            for j in range(1, 20):
-                if i + j < len(textos_visiveis):
-                    t = textos_visiveis[i+j]
-                    if not data_2a and re.search(r"\d{2}/\d{2}/\d{4}", t):
-                        data_2a = fmt_data_iso(t)
-                    if valor_2a == 0.0:
-                        val = parse_valor_br(t)
-                        if val > 0 and ("," in t or "." in t) and not re.search(r"\d{2}/\d{2}/\d{4}", t):
-                            valor_2a = val
+            window = textos_visiveis[i+1 : min(i+25, len(textos_visiveis))]
+            candidatos_valor_2a = []
 
-    base_avaliacao = valor_1a if valor_1a > 0 else val_avaliacao
+            for idx, t in enumerate(window):
+                if not data_2a and re.search(r"\d{2}/\d{2}/\d{4}", t):
+                    data_2a = fmt_data_iso(t)
+                
+                val = parse_valor_br(t)
+                if val > 0 and ("," in t or "." in t) and not re.search(r"\d{2}/\d{2}/\d{4}", t):
+                    ctx = " ".join(window[max(0, idx-2):idx+1]).lower()
+                    candidatos_valor_2a.append((val, ctx))
 
-    # Montagem da 1ª Hasta
+            # Raciocínio de escolha do valor da 2ª Praça:
+            # 1ª Tentativa: Valor explicitamente associado a "mínimo" / "lance" (e sem "avaliação")
+            for val, ctx in candidatos_valor_2a:
+                if re.search(r"m[íi]nimo|lance|partir", ctx) and "avalia" not in ctx:
+                    valor_2a = val
+                    break
+
+            # 2ª Tentativa: Se não achou por rótulo, pega o valor MENOR que a avaliação
+            if valor_2a == 0.0 and candidatos_valor_2a:
+                ref_aval = val_avaliacao if val_avaliacao > 0 else valor_1a
+                valores_menores = [v for v, ctx in candidatos_valor_2a if 0 < v < ref_aval]
+                
+                if valores_menores:
+                    valor_2a = valores_menores[0]
+                else:
+                    # Fallback: primeiro valor numérico da janela
+                    valor_2a = candidatos_valor_2a[0][0]
+
+    # Valor de referência para cálculo do deságio
+    base_avaliacao = val_avaliacao if val_avaliacao > 0 else (valor_1a if valor_1a > 0 else valor_2a)
+
+    # -------------------------------------------------------------
+    # MONTAGEM DOS OBJETOS DE HASTA
+    # -------------------------------------------------------------
     if data_1a or valor_1a > 0:
-        desagio = round(((base_avaliacao - valor_1a) / base_avaliacao) * 100, 2) if base_avaliacao > 0 and valor_1a > 0 else 0.0
+        val_lance_1 = valor_1a if valor_1a > 0 else base_avaliacao
+        desagio_1 = round(((base_avaliacao - val_lance_1) / base_avaliacao) * 100, 2) if base_avaliacao > 0 else 0.0
         hastas.append({
             "numero_hasta": 1,
             "data_inicio": data_1a or "",
             "data_fim": data_1a or "",
             "valor_avaliacao": base_avaliacao,
-            "valor_lance_minimo": valor_1a if valor_1a > 0 else base_avaliacao,
-            "percentual_desagio": max(desagio, 0.0)
+            "valor_lance_minimo": val_lance_1,
+            "percentual_desagio": max(desagio_1, 0.0)
         })
 
-    # Montagem da 2ª Hasta
     if data_2a or valor_2a > 0:
-        desagio = round(((base_avaliacao - valor_2a) / base_avaliacao) * 100, 2) if base_avaliacao > 0 and valor_2a > 0 else 0.0
+        val_lance_2 = valor_2a if valor_2a > 0 else base_avaliacao
+        desagio_2 = round(((base_avaliacao - val_lance_2) / base_avaliacao) * 100, 2) if base_avaliacao > 0 else 0.0
         hastas.append({
             "numero_hasta": 2,
             "data_inicio": data_2a or "",
             "data_fim": data_2a or "",
             "valor_avaliacao": base_avaliacao,
-            "valor_lance_minimo": valor_2a if valor_2a > 0 else base_avaliacao,
-            "percentual_desagio": max(desagio, 0.0)
+            "valor_lance_minimo": val_lance_2,
+            "percentual_desagio": max(desagio_2, 0.0)
         })
 
-    # Fallback para Extrajudicial (Hasta Única)
+    # -------------------------------------------------------------
+    # FALLBACK: EXTRAJUDICIAL / HASTA ÚNICA
+    # -------------------------------------------------------------
     if not hastas:
         data_unica = None
         valor_unico = 0.0
@@ -138,13 +176,13 @@ def extrair_hastas_pagina(textos_visiveis: list, val_avaliacao: float) -> list:
                     data_unica = fmt_data_iso(texto)
 
         if data_unica or valor_unico > 0:
-            base_avaliacao = valor_unico if valor_unico > 0 else val_avaliacao
+            base_unica = valor_unico if valor_unico > 0 else val_avaliacao
             hastas.append({
                 "numero_hasta": 1,
                 "data_inicio": data_unica or "",
                 "data_fim": data_unica or "",
-                "valor_avaliacao": base_avaliacao,
-                "valor_lance_minimo": valor_unico if valor_unico > 0 else base_avaliacao,
+                "valor_avaliacao": base_unica,
+                "valor_lance_minimo": valor_unico if valor_unico > 0 else base_unica,
                 "percentual_desagio": 0.0
             })
 
