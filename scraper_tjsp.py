@@ -60,80 +60,78 @@ def extrair_bairro(titulo: str, endereco: str) -> str:
     return "Araçatuba"
 
 import re
+from bs4 import BeautifulSoup
 
-def extrair_hastas_pagina(html_ou_texto_completo, val_avaliacao: float) -> list:
+def extrair_hastas_pagina(soup: BeautifulSoup, val_avaliacao: float) -> list:
     """
-    Extrai hastas combinando varredura por expressões regulares diretamente no texto
-    e seleção por ordenação de valores monetários.
+    Extrai as praças/hastas analisando a estrutura HTML específica da Mega Leilões.
     """
-    # Garante que temos uma string única do texto
-    if isinstance(html_ou_texto_completo, list):
-        texto_pagina = " ".join(html_ou_texto_completo)
-    else:
-        texto_pagina = str(html_ou_texto_completo)
-
     hastas = []
+    
+    # Busca os blocos/cards de cada praça na página da Mega Leilões
+    blocos_praca = soup.find_all(['div', 'section'], class_=re.compile(r'instance|praca|batch-instance', re.I))
+    
+    # Se encontrou blocos estruturados na página
+    if blocos_praca:
+        for idx, bloco in enumerate(blocos_praca, start=1):
+            texto_bloco = bloco.get_text(separator=' ', strip=True)
+            texto_lower = texto_bloco.lower()
 
-    # 1. Identificar blocos ou trechos referentes a 1ª e 2ª praça
-    data_1a, data_2a = None, None
-    valor_1a, valor_2a = 0.0, 0.0
+            # Evita processar blocos irrelevantes
+            if not any(k in texto_lower for k in ['1ª', '2ª', 'praça', 'leilão', 'lance mínimo', 'encerramento']):
+                continue
 
-    # Busca todas as datas no formato dd/mm/yyyy no texto
-    datas_encontradas = re.findall(r"\d{2}/\d{2}/\d{4}", texto_pagina)
-    if len(datas_encontradas) >= 1:
-        data_1a = fmt_data_iso(datas_encontradas[0])
-    if len(datas_encontradas) >= 2:
-        data_2a = fmt_data_iso(datas_encontradas[1])
+            # Busca Data do leilão no bloco
+            data_match = re.search(r'\d{2}/\d{2}/\d{4}', texto_bloco)
+            data_hasta = fmt_data_iso(data_match.group(0)) if data_match else ""
 
-    # Busca TODOS os valores monetários no formato brasileiro (ex: 341.280,92 ou 238.896,64)
-    # Padrão: R$ opcional, seguido de dígitos com pontos de milhar e vírgula decimal
-    padrao_moeda = r"(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})"
-    matches_valores = re.findall(padrao_moeda, texto_pagina)
+            # Extrai valores monetários presentes EXCLUSIVAMENTE dentro deste bloco
+            matches_valores = re.findall(r'(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})', texto_bloco)
+            valores_bloco = [parse_valor_br(v) for v in matches_valores if parse_valor_br(v) > 0]
 
-    valores_num = []
-    for m in matches_valores:
-        v = parse_valor_br(m)
-        if v > 1000 and v not in valores_num:  # Filtra ruídos pequenos e duplicatas
-            valores_num.append(v)
+            if not valores_bloco:
+                continue
 
-    # Lógica de Atribuição dos Valores:
-    # Em leilões judiciais com 2 praças, o valor maior é a Avaliação/1ª Praça e o menor é o Lance Mínimo da 2ª Praça.
-    if valores_num:
-        val_max = max(valores_num)
-        val_min = min(valores_num)
+            # Lógica de seleção do lance mínimo do bloco
+            # Se houver mais de um valor, o lance mínimo é o menor valor significativo (evitando valores < 10.000 se o imóvel for grande)
+            base_aval = val_avaliacao if val_avaliacao > 0 else max(valores_bloco)
+            
+            # Filtra valores que representam de fato o imóvel (ex: > 30% da avaliação para evitar pegar incrementos de R$ 2.000)
+            valores_validos = [v for v in valores_bloco if v >= (base_aval * 0.30)]
+            
+            lance_minimo = min(valores_validos) if valores_validos else (min(valores_bloco) if valores_bloco else base_aval)
 
-        # 1ª Praça assume a avaliação / valor cheio
-        valor_1a = val_avaliacao if val_avaliacao > 0 else val_max
+            desagio = round(((base_aval - lance_minimo) / base_aval) * 100, 2) if base_aval > 0 else 0.0
 
-        # Se houver um valor menor detectado na página, este É o lance mínimo da 2ª praça
-        if val_min < valor_1a:
-            valor_2a = val_min
-        else:
-            valor_2a = valor_1a
+            hastas.append({
+                "numero_hasta": idx,
+                "data_inicio": data_hasta,
+                "data_fim": data_hasta,
+                "valor_avaliacao": base_aval,
+                "valor_lance_minimo": lance_minimo,
+                "percentual_desagio": max(desagio, 0.0)
+            })
 
-    base_aval = val_avaliacao if val_avaliacao > 0 else valor_1a
+    # FALLBACK: Se o leilão for extrajudicial ou a estrutura HTML for simplificada (Hasta Única)
+    if not hastas:
+        texto_completo = soup.get_text(separator=' ', strip=True)
+        
+        # Procura por lance inicial/mínimo
+        match_valor = re.search(r'(?:lance\s*m[íi]nimo|lance\s*inicial|a\s*partir\s*de)\s*:?\s*(?:R\$\s*)?(\d{1,3}(?:\.\d{3})*,\d{2})', texto_completo, re.I)
+        valor_unico = parse_valor_br(match_valor.group(1)) if match_valor else val_avaliacao
+        
+        data_match = re.search(r'\d{2}/\d{2}/\d{4}', texto_completo)
+        data_unica = fmt_data_iso(data_match.group(0)) if data_match else ""
 
-    # Montagem da 1ª Hasta
-    if data_1a or valor_1a > 0:
+        base_aval = val_avaliacao if val_avaliacao > 0 else valor_unico
+
         hastas.append({
             "numero_hasta": 1,
-            "data_inicio": data_1a or "",
-            "data_fim": data_1a or "",
+            "data_inicio": data_unica,
+            "data_fim": data_unica,
             "valor_avaliacao": base_aval,
-            "valor_lance_minimo": valor_1a if valor_1a > 0 else base_aval,
+            "valor_lance_minimo": valor_unico if valor_unico > 0 else base_aval,
             "percentual_desagio": 0.0
-        })
-
-    # Montagem da 2ª Hasta
-    if data_2a or (valor_2a > 0 and valor_2a != valor_1a):
-        desagio = round(((base_aval - valor_2a) / base_aval) * 100, 2) if base_aval > 0 else 0.0
-        hastas.append({
-            "numero_hasta": 2,
-            "data_inicio": data_2a or "",
-            "data_fim": data_2a or "",
-            "valor_avaliacao": base_aval,
-            "valor_lance_minimo": valor_2a,
-            "percentual_desagio": max(desagio, 0.0)
         })
 
     return hastas
